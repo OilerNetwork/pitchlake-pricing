@@ -52,4 +52,19 @@ fn main() {
         .alias("TWAP_7d"))
         .collect().expect("Cannot collect");
 
+    let mut dfs: Vec<DataFrame> = Vec::new();
+
+    let start_date = DateTime::from_timestamp(df.column("date").unwrap().datetime().unwrap().get(0).unwrap() / 1000, 0).unwrap();
+    let end_date = DateTime::from_timestamp(df.column("date").unwrap().datetime().unwrap().get(df.height() - 1).unwrap() / 1000, 0).unwrap();
+    let num_months = (end_date.year() - start_date.year()) * 12 + i32::try_from(end_date.month()).unwrap() - i32::try_from(start_date.month()).unwrap() + 1;
+
+    for i in 0..num_months - 4 {
+        let period_start = start_date + chrono::Months::new(i as u32);
+        let period_end = period_start + chrono::Months::new(5);
+        let period_df = df.clone().lazy().filter(col("date").gt_eq(lit(period_start.naive_utc())).and(col("date").lt(lit(period_end.naive_utc())))).collect().expect("Cannot collect");
+        println!("Period {}-{}", period_start, period_end);
+        println!("Number of rows: {:?}", period_df.height());
+        dfs.push(period_df); 
+    }
+
 }
