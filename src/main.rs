@@ -1,5 +1,6 @@
 use polars::prelude::*;
 use chrono::prelude::*;
+use ndarray::ArrayBase;
 
 fn read_csv(file: &str) -> PolarsResult<DataFrame> {
     CsvReadOptions::default()
@@ -42,8 +43,8 @@ fn main() {
         .with_column(col("base_fee")
         .rolling_mean(
             RollingOptionsFixedWindow {
-                    window_size: 5,
-                    min_periods: 5,
+                    window_size: 24*7,
+                    min_periods: 24*7,
                     weights: None,
                     center: false,
                     fn_params: None
@@ -62,9 +63,34 @@ fn main() {
         let period_start = start_date + chrono::Months::new(i as u32);
         let period_end = period_start + chrono::Months::new(5);
         let period_df = df.clone().lazy().filter(col("date").gt_eq(lit(period_start.naive_utc())).and(col("date").lt(lit(period_end.naive_utc())))).collect().expect("Cannot collect");
-        println!("Period {}-{}", period_start, period_end);
-        println!("Number of rows: {:?}", period_df.height());
         dfs.push(period_df); 
+    }
+
+    // let mut to_export = Vec::new()
+
+    for (idx, period_df) in dfs.iter().enumerate() {
+
+        let twap_7d_series = period_df.column("TWAP_7d").expect("Cannot find column");
+        let strike = twap_7d_series.f64().unwrap().last().unwrap();
+       
+        let num_paths = 15000;  
+        let n_periods = 720;
+        let cap_level = 0.3;
+        let risk_free_rate = 0.05;
+
+        // Data Cleaning and Preprocessing - removing null if exist and log transformation
+        // ===============================================================================================
+        
+        // drop rows with null values
+        let mut df = period_df.clone().lazy().filter(col("TWAP_7d").is_not_null()).collect().expect("Cannot collect");
+        
+        // let log_base_fees = df.column("base_fee").unwrap()
+        //     .f64().unwrap()
+        //     .to_ndarray().unwrap()
+        //     .log2()
+
+        println!("{:?}", df);
+
     }
 
 }
