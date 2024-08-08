@@ -19,16 +19,6 @@ fn main() -> Result<(), Error> {
 
     let mut df: DataFrame = read_csv(data_file).expect("Cannot read file");
 
-    // let dates = df
-    //     .column("timestamp")
-    //     .expect("Cannot find column")
-    //     .i64()
-    //     .expect("Cannot cast to i64")
-    //     .apply(|s| s.map(|s| s * 1000)) // convert into milliseconds
-    //     .into_series()
-    //     .cast(&DataType::Datetime(TimeUnit::Milliseconds, None))
-    //     .expect("Cannot cast to datetime");
-
     let dates = df
         .column("timestamp")?
         .i64()?
