@@ -5,7 +5,7 @@ use linfa::traits::Fit;
 use linfa_linear::LinearRegression;
 use ndarray::prelude::*;
 use ndarray::{stack, Axis, Array1, Array2};
-// use ndarray_linalg::LeastSquaresSvd;
+use ndarray_linalg::LeastSquaresSvd;
 use polars::prelude::*;
 use anyhow::{anyhow as err, Error};
 use std::f64::consts::PI;
@@ -237,13 +237,13 @@ fn main() -> Result<(), Error> {
         let t_array = df["t"].f64()?.to_ndarray()?.to_owned();
         let c = season_matrix(t_array);
 
-        // let detrended_log_base_fee_array = df["detrended_log_base_fee"].f64()?.to_ndarray()?.to_owned();
-        // let season_param = c.least_squares(&detrended_log_base_fee_array)?.solution;
-        // let season = c.dot(&season_param);
-        // let de_seasonalised_detrended_log_base_fee = df["detrended_log_base_fee"].f64()?.to_ndarray()?.to_owned() - season;
-        // df.with_column(Series::new("de_seasonalized_detrended_log_base_fee", de_seasonalised_detrended_log_base_fee.to_vec()))?;
+        let detrended_log_base_fee_array = df["detrended_log_base_fee"].f64()?.to_ndarray()?.to_owned();
+        let season_param = c.least_squares(&detrended_log_base_fee_array)?.solution;
+        let season = c.dot(&season_param);
+        let de_seasonalised_detrended_log_base_fee = df["detrended_log_base_fee"].f64()?.to_ndarray()?.to_owned() - season;
+        df.with_column(Series::new("de_seasonalized_detrended_log_base_fee", de_seasonalised_detrended_log_base_fee.to_vec()))?;
 
-        println!("{:?}", df);
+        println!("{:?}", df["de_seasonalized_detrended_log_base_fee"]);
         break;
     }
 
