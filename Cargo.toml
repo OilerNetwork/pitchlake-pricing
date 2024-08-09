@@ -9,6 +9,7 @@ chrono = "0.4.38"
 linfa = "0.7.0"
 linfa-linear = "0.7.0"
 ndarray = "0.15"
+ndarray-linalg = "0.14.0"
 polars = { version = "0.41.3", features = ["lazy", "dynamic_group_by", "rolling_window", "ndarray"] }
 polars-core = "0.41.3"
 polars-io = "0.41.3"
