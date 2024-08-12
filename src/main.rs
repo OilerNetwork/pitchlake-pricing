@@ -9,6 +9,7 @@ use ndarray_linalg::LeastSquaresSvd;
 use polars::prelude::*;
 use anyhow::{anyhow as err, Error};
 use std::f64::consts::PI;
+use arima::estimate::fit;
 
 fn read_csv(file: &str) -> PolarsResult<DataFrame> {
     CsvReadOptions::default()
@@ -241,9 +242,15 @@ fn main() -> Result<(), Error> {
         let season_param = c.least_squares(&detrended_log_base_fee_array)?.solution;
         let season = c.dot(&season_param);
         let de_seasonalised_detrended_log_base_fee = df["detrended_log_base_fee"].f64()?.to_ndarray()?.to_owned() - season;
-        df.with_column(Series::new("de_seasonalized_detrended_log_base_fee", de_seasonalised_detrended_log_base_fee.to_vec()))?;
+        df.with_column(Series::new("de_seasonalized_detrended_log_base_fee", de_seasonalised_detrended_log_base_fee.clone().to_vec()))?;
 
-        println!("{:?}", df["de_seasonalized_detrended_log_base_fee"]);
+        // Fitting an ARIMA model to the deseasaonalized and detrended log base fee, finding a distribution for the residuals
+        // ===============================================================================================
+
+        let de_seasonalized_detrended_log_base_fee_slice = de_seasonalised_detrended_log_base_fee.as_slice().ok_or_else(|| err!("Can't convert to slice"))?;
+        let results = fit(de_seasonalized_detrended_log_base_fee_slice, 12, 0, 4)?;
+
+        println!("{:?}", Series::new("Fitted", results));
         break;
     }
 

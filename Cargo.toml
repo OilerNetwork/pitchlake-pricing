@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0.86"
+arima = "0.3.0"
 chrono = "0.4.38"
 linfa = "0.7.0"
 linfa-linear = "0.7.0"
