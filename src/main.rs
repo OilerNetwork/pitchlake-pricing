@@ -9,7 +9,7 @@ use ndarray_linalg::LeastSquaresSvd;
 use polars::prelude::*;
 use anyhow::{anyhow as err, Error};
 use std::f64::consts::PI;
-use arima::estimate::fit;
+use arima::estimate::{fit, residuals};
 
 fn read_csv(file: &str) -> PolarsResult<DataFrame> {
     CsvReadOptions::default()
@@ -142,12 +142,12 @@ fn main() -> Result<(), Error> {
 
     for (idx, period_df) in dfs.iter().enumerate() {
         let twap_7d_series = period_df.column("TWAP_7d")?;
-        let strike = twap_7d_series.f64()?.last().ok_or_else(|| err!("The series is empty"));
+        // let strike = twap_7d_series.f64()?.last().ok_or_else(|| err!("The series is empty"));
 
-        let num_paths = 15000;
-        let n_periods = 720;
-        let cap_level = 0.3;
-        let risk_free_rate = 0.05;
+        // let num_paths = 15000;
+        // let n_periods = 720;
+        // let cap_level = 0.3;
+        // let risk_free_rate = 0.05;
 
         // Data Cleaning and Preprocessing - removing null if exist and log transformation
         // ===============================================================================================
@@ -196,6 +196,7 @@ fn main() -> Result<(), Error> {
 
         let dataset = Dataset::<f64, f64, Ix1>::new(x.clone(), y);
         let trend_model = LinearRegression::default()
+            .with_intercept(false)
             .fit(&dataset)?;
 
         df.with_column(Series::new(
@@ -248,10 +249,15 @@ fn main() -> Result<(), Error> {
         // ===============================================================================================
 
         let de_seasonalized_detrended_log_base_fee_slice = de_seasonalised_detrended_log_base_fee.as_slice().ok_or_else(|| err!("Can't convert to slice"))?;
-        let results = fit(de_seasonalized_detrended_log_base_fee_slice, 12, 0, 4)?;
+        let arima_coefficients = fit(de_seasonalized_detrended_log_base_fee_slice, 12, 0, 4)?;
 
-        println!("{:?}", Series::new("Fitted", results));
+        // let residuals = residuals(de_seasonalized_detrended_log_base_fee_slice, 0.0, Some(&[12.0]), Some(&[4.0]))?;
         break;
+
+        // let residuals = df["de_seasonalized_detrended_log_base_fee"].f64()?.to_ndarray()?.to_owned() - Array1::from(arima_fitted_values);
+        // let cond_variance = residuals.var(0.0); // ddof needs to match the default value in numpy
+        // let standardized_residuals = residuals / cond_variance.sqrt();
+        
     }
 
     Ok(())
