@@ -248,16 +248,29 @@ fn main() -> Result<(), Error> {
         // Fitting an ARIMA model to the deseasaonalized and detrended log base fee, finding a distribution for the residuals
         // ===============================================================================================
 
-        let de_seasonalized_detrended_log_base_fee_slice = de_seasonalised_detrended_log_base_fee.as_slice().ok_or_else(|| err!("Can't convert to slice"))?;
-        let arima_coefficients = fit(de_seasonalized_detrended_log_base_fee_slice, 12, 0, 4)?;
+        let timeseries = de_seasonalised_detrended_log_base_fee.as_slice().ok_or_else(|| err!("Can't convert to slice"))?;
 
-        // let residuals = residuals(de_seasonalized_detrended_log_base_fee_slice, 0.0, Some(&[12.0]), Some(&[4.0]))?;
+        // Fit the model
+        let ar = 12;
+        let d = 0;
+        let ma = 4;
+        let coefficients = fit(timeseries, ar, d, ma)?;
+
+        // Extract coefficients
+        let intercept = coefficients[0];
+        let phi = &coefficients[1..ar+1];
+        let theta = &coefficients[ar+1..];
+
+        // Calculate residuals using the provided function
+        let residuals = residuals(&timeseries, intercept, Some(phi), Some(theta))?;
+       
+        println!("Coefficients: {:?}", coefficients);
+        println!("{:?}", Series::new("Residuals", residuals));
         break;
 
         // let residuals = df["de_seasonalized_detrended_log_base_fee"].f64()?.to_ndarray()?.to_owned() - Array1::from(arima_fitted_values);
         // let cond_variance = residuals.var(0.0); // ddof needs to match the default value in numpy
         // let standardized_residuals = residuals / cond_variance.sqrt();
-        
     }
 
     Ok(())
