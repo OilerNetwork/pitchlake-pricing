@@ -1,0 +1,32 @@
+[tool.poetry]
+name = "pitchlake"
+version = "0.1.0"
+description = "A Library for Pricing Pitchlake"
+authors = ["Nethermind"]
+license = "N/A"
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.11"
+statsmodels = "^0.14.2"
+spicepy = {git = "https://github.com/spiceai/spicepy"}
+duneanalytics = "^2.0.0"
+dune-client = "^1.7.3"
+seaborn = "^0.13.2"
+fastkde = "^2.0.1"
+scikit-learn = "^1.4.2"
+joblib = "^1.4.2"
+ruptures = "^1.1.9"
+scipy = "^1.14.0"
+matplotlib = "^3.9.1"
+pandas = "^2.2.2"
+
+[tool.poetry.group.dev.dependencies]
+numpy = "^1.26.4"
+matplotlib = "^3.9.0"
+scipy = "^1.13.0"
+pandas = "^2.2.2"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
