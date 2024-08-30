@@ -1,11 +1,11 @@
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from ruptures import Binseg
 import statsmodels.api as sm
 from statsmodels.tsa.arima.model import ARIMA
 from scipy.stats import laplace_asymmetric
-
+from scipy.optimize import minimize
+import sys
 
 # Simulation of prices and the premium for a reserve price,
 # given a dataframe with base fee and date, and a strike price we will simulate the future prices and calculate the premium
@@ -14,11 +14,6 @@ from scipy.stats import laplace_asymmetric
 # ===============================================================================================
 def simulate_prices_and_payoff(df, strike, num_paths=15000, nPeriods=720, cap_level=0.3, risk_free_rate=0.05):
 
-    # print(df.head(1))
-    # print(df.tail(1))
-    # print(df[np.isnan(df["TWAP_7d"])])
-    # rows_with_nan = df[df.isna().any(axis=1)]
-    # print(rows_with_nan)
     # Data Cleaning and Preprocessing - removing NaN if exist and log transformation
     # ===============================================================================================
     df.dropna(inplace=True)
@@ -33,6 +28,9 @@ def simulate_prices_and_payoff(df, strike, num_paths=15000, nPeriods=720, cap_le
     trend_model = sm.OLS(y, X).fit()
     df['trend'] = trend_model.predict(X)
     df['detrended_log_base_fee'] = df['log_base_fee'] - df['trend']
+
+    # plt.plot(df['date'], df['detrended_log_base_fee'], label='Log Base Fee', color='black')
+    # plt.show()
 
     # Seasonality modelling and removal from the detrended log base fee
     # ===============================================================================================
@@ -57,50 +55,74 @@ def simulate_prices_and_payoff(df, strike, num_paths=15000, nPeriods=720, cap_le
     seasonParam, _, _, _ = np.linalg.lstsq(C, df['detrended_log_base_fee'], rcond=None)
     season = C @ seasonParam
     df['de_seasonalized_detrended_log_base_fee'] = df['detrended_log_base_fee'] - season
+
+
+    # Monte Carlo Parameter Estimation for the MRJ model
+    # ===============================================================================================
+    dt = 1 / (365 * 24)
+    Pt = df['de_seasonalized_detrended_log_base_fee'].values[1:]
+    Pt_1 = df['de_seasonalized_detrended_log_base_fee'].values[:-1]
+ 
+
+    def laplace_pdf(x, mu, b):
+        return 1 / (2 * b) * np.exp(-np.abs(x - mu) / b)
+
+    def mrjpdf(params, Pt, Pt_1, dt):
+        a, phi, mu_J, sigmaSq, sigmaSq_J, lambda_ = params
+        term1 = lambda_ * laplace_pdf(Pt, a * dt + phi * Pt_1 + mu_J, np.sqrt(sigmaSq + sigmaSq_J))
+        term2 = (1 - lambda_) * laplace_pdf(Pt, a * dt + phi * Pt_1, np.sqrt(sigmaSq))
+
+        return term1 + term2
     
+    def neg_log_likelihood(params, Pt, Pt_1, dt):
+        pdf_vals = mrjpdf(params, Pt, Pt_1, dt)
+        # Avoid log(0) by adding a small constant to pdf_vals
+        log_likelihood = np.sum(np.log(pdf_vals + 1e-1))
+        return -log_likelihood
+    x0 = [0, 0, 0.7, np.var(df['de_seasonalized_detrended_log_base_fee']), 0.1, 0.005]
+    
+    print("\n")
+    print("X0", x0)
+    print("\n")
 
-    # Fitting an ARIMA model to the deseasaonalized and detrended log base fee, finding a distribution for the residuals
+    bounds = [
+        (-np.inf, np.inf), 
+        (-np.inf, 1), 
+        (0, np.inf), 
+        (0, np.inf), 
+        (0, np.inf), 
+        (0, 24)
+        ]
+    result = minimize(neg_log_likelihood, x0, args=(Pt, Pt_1, dt), bounds=bounds, method='L-BFGS-B')
+    params = result.x
+    alpha = params[0] / dt
+    kappa = (1 - params[1]) / dt
+    mu_J = params[2]
+    sigma = np.sqrt(params[3] / dt)
+    sigma_J = np.sqrt(params[4]) 
+    lambda_ = params[5] / dt
+
+
+    # Monte Carlo Simulation of the MRJ model
     # ===============================================================================================
-    DTMdl = ARIMA(df['de_seasonalized_detrended_log_base_fee'], order=(12, 0, 4))
-    results = DTMdl.fit()
-    df['fitted'] = results.fittedvalues
-    df['residules'] = df['de_seasonalized_detrended_log_base_fee'] - results.fittedvalues
-    condVar = np.var(df['residules'])
-    df['standardized_residuals'] = df['residules'] / np.sqrt(condVar)
-    kappa, loc, scale = laplace_asymmetric.fit(df['standardized_residuals'])
-
-    # The code below is just for debugging - to be removed
-
-    # new_df = df[['de_seasonalized_detrended_log_base_fee']].head(10)
-    # DTMdl = ARIMA(new_df['de_seasonalized_detrended_log_base_fee'], order=(12, 0, 4))
-    # results = DTMdl.fit()
-    # print(results.summary())
-    # new_df['fitted'] = results.fittedvalues
-    # new_df['residules'] = new_df['de_seasonalized_detrended_log_base_fee'] - results.fittedvalues
-    # print(new_df)
-
-    print(results.summary())
-    return True, True
-
-    # Simulating future prices using the ARIMA model and the distribution of the residuals 
-    # ===============================================================================================
-    start_date = df['date'].iloc[-1]
-    sim_standardized_residuals = laplace_asymmetric.rvs(kappa=kappa, loc=loc, scale=scale, size=(nPeriods, num_paths))
-    sim_residuals = sim_standardized_residuals * np.sqrt(condVar)
-    arima_forecast = results.get_forecast(steps=nPeriods)
-    arima_predictions = arima_forecast.predicted_mean.values  
-    simulated_paths = np.zeros((nPeriods, num_paths))
-    for i in range(num_paths):
-        simulated_paths[:, i] = arima_predictions + sim_residuals[:, i]
+    nPeriods = 30 * 24 
+    j = np.random.binomial(1, lambda_ * dt, (nPeriods, num_paths))
+    SimPrices = np.zeros((nPeriods, num_paths))
+    SimPrices[0, :] = df['de_seasonalized_detrended_log_base_fee'].values[-1]
+    n1 = np.random.normal(size=(nPeriods, num_paths)) #fitted from previous ARIMA analysis.
+    n2 = np.random.normal(size=(nPeriods, num_paths))
+    for i in range(1, nPeriods):
+        SimPrices[i, :] = alpha * dt + (1 - kappa * dt) * SimPrices[i - 1, :] + sigma * np.sqrt(dt) * n1[i, :] + j[i, :] * (mu_J + sigma_J * n2[i, :])
     last_date = df['date'].iloc[-1]
     SimPriceDates = pd.date_range(last_date, periods=nPeriods, freq='H')
     SimHourlyTimes = (SimPriceDates - df['date'].iloc[0]).total_seconds() / 3600
 
+    return "",""
     # Adding seasonality back to the simulated prices
     # ===============================================================================================
     C = season_matrix(SimHourlyTimes)
     season = C @ seasonParam
-    logSimPrices = simulated_paths + season.reshape(-1, 1)
+    logSimPrices = SimPrices + season.reshape(-1, 1)
 
 
     # Calibrating and adding stochastic trend to the simulation. 
@@ -169,13 +191,12 @@ def simulate_prices_and_payoff(df, strike, num_paths=15000, nPeriods=720, cap_le
 df = pd.read_csv('../data.csv')  # Ensure your data.csv has 'timestamp' and 'base_fee' columns
 df['date'] = pd.to_datetime(df['timestamp'], unit='s')
 df = df.set_index('date').resample('h').mean().reset_index()
-df['TWAP_7d'] = df['base_fee'].rolling(window=24*7).mean()
-
+df['TWAP_7d'] = df['base_fee'].rolling(window=24 * 7).mean()
 
 # plt.plot(df['date'], df['TWAP_7d'])
 # plt.show()
 
-# # Create a list to store the dataframes
+# Create a list to store the dataframes
 dfs = []
 
 start_date = df['date'].min()
@@ -194,27 +215,29 @@ to_export = []
 for idx, period_df in enumerate(dfs):
     strike = period_df['TWAP_7d'].iloc[-1]  # Strike is at the money
     simulated_prices, premium = simulate_prices_and_payoff(period_df, strike)
-    break
-    # if idx + 1 < len(dfs):
-    #     next_period_df = dfs[idx + 1]
-    #     settlement_price = next_period_df['TWAP_7d'].iloc[-1]
-    #     ending_timestamp = next_period_df['timestamp'].iloc[-1]
-    # else:
-    #     pass # Or handle the last period accordingly
 
-    # to_append = {
-    #     'starting_timestamp': round(period_df['timestamp'].iloc[-1]),
-    #     'ending_timestamp': round(ending_timestamp),
-    #     'reserve_price': premium,
-    #     'strike_price': strike, 
-    #     'settlement_price': settlement_price,  # First value of the next period
-    #     'cap_level': 3000,  # in basis points
-    # }
-    # print(to_append)
-    # to_export.append(to_append)
-    # pd.DataFrame(to_export).to_csv('output.csv', index=False)
-    # print(f"Period {idx + 1}")
-    # print(f"Simulated Prices:\n{simulated_prices}")
-    # print(f"Average Payoff: {premium:.2f}\n")
+    sys.exit()
+
+    if idx + 1 < len(dfs):
+        next_period_df = dfs[idx + 1]
+        settlement_price = next_period_df['TWAP_7d'].iloc[-1]
+        ending_timestamp = next_period_df['timestamp'].iloc[-1]
+    else:
+        pass # Or handle the last period accordingly
+
+    to_append = {
+        'starting_timestamp': round(period_df['timestamp'].iloc[-1]),
+        'ending_timestamp': round(ending_timestamp),
+        'reserve_price': premium,
+        'strike_price': strike, 
+        'settlement_price': settlement_price,  # First value of the next period
+        'cap_level': 3000,  # in basis points
+    }
+    print(to_append)
+    to_export.append(to_append)
+    pd.DataFrame(to_export).to_csv('output.csv', index=False)
+    print(f"Period {idx + 1}")
+    print(f"Simulated Prices:\n{simulated_prices}")
+    print(f"Average Payoff: {premium:.2f}\n")
 
 print(to_export)

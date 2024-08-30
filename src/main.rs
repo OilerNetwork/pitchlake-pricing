@@ -1,15 +1,20 @@
+use anyhow::{anyhow as err, Error};
+use argmin::core::Gradient;
+use argmin::{
+    core::{CostFunction, Executor, observers::ObserverMode},
+    solver::{linesearch::MoreThuenteLineSearch, quasinewton::LBFGS},
+};
+use argmin_observer_slog::SlogLogger;
 use chrono::prelude::*;
 use chrono::Months;
 use linfa::prelude::*;
 use linfa::traits::Fit;
 use linfa_linear::LinearRegression;
 use ndarray::prelude::*;
-use ndarray::{stack, Axis, Array1, Array2};
+use ndarray::{stack, Array1, Array2, Axis};
 use ndarray_linalg::LeastSquaresSvd;
 use polars::prelude::*;
-use anyhow::{anyhow as err, Error};
 use std::f64::consts::PI;
-use arima::estimate::{fit, residuals};
 
 fn read_csv(file: &str) -> PolarsResult<DataFrame> {
     CsvReadOptions::default()
@@ -108,7 +113,7 @@ fn main() -> Result<(), Error> {
         .ok_or_else(|| err!("No row 0 in the date column"))?;
     let start_date = DateTime::from_timestamp(start_date_value / 1000, 0)
         .ok_or_else(|| err!("Can't calculate the start date"))?;
-    
+
     let end_date_row = df.height() - 1;
     let end_date_value = df
         .column("date")?
@@ -117,7 +122,7 @@ fn main() -> Result<(), Error> {
         .ok_or_else(|| err!("No row {end_date_row} in the date column"))?;
     let end_date = DateTime::from_timestamp(end_date_value / 1000, 0)
         .ok_or_else(|| err!("Can't calculate the end date"))?;
-    
+
     let num_months = (end_date.year() - start_date.year()) * 12 + i32::try_from(end_date.month())?
         - i32::try_from(start_date.month())?
         + 1;
@@ -140,7 +145,8 @@ fn main() -> Result<(), Error> {
 
     // let mut to_export = Vec::new()
 
-    for (idx, period_df) in dfs.iter().enumerate() {
+    // TODO: remove .take(1)
+    for (idx, period_df) in dfs.iter().enumerate().take(1) {
         let twap_7d_series = period_df.column("TWAP_7d")?;
         // let strike = twap_7d_series.f64()?.last().ok_or_else(|| err!("The series is empty"));
 
@@ -173,8 +179,7 @@ fn main() -> Result<(), Error> {
         let time_index_series = Series::new("time_index", (0..df.height() as i64).into_iter());
         df.with_column(time_index_series)?;
 
-        let ones = Array::<f64, Ix1>::ones(
-            df.height() as usize);
+        let ones = Array::<f64, Ix1>::ones(df.height() as usize);
         let x = stack![
             Axis(1),
             Array::from(
@@ -220,8 +225,6 @@ fn main() -> Result<(), Error> {
         let start_date = DateTime::from_timestamp(start_date_value / 1000, 0)
             .ok_or_else(|| err!("Can't calculate the start date"))?;
 
-        
-
         // Optimisation tip: this is same as the time_index, so we can reuse it
         let t_series: Vec<f64> = df
             .column("date")?
@@ -229,7 +232,9 @@ fn main() -> Result<(), Error> {
             .into_iter()
             .map(|opt_date| {
                 opt_date.map_or(0.0, |date| {
-                    (DateTime::from_timestamp(date / 1000, 0).unwrap() - start_date).num_seconds() as f64 / 3600.0
+                    (DateTime::from_timestamp(date / 1000, 0).unwrap() - start_date).num_seconds()
+                        as f64
+                        / 3600.0
                 })
             })
             .collect();
@@ -239,39 +244,156 @@ fn main() -> Result<(), Error> {
         let t_array = df["t"].f64()?.to_ndarray()?.to_owned();
         let c = season_matrix(t_array);
 
-        let detrended_log_base_fee_array = df["detrended_log_base_fee"].f64()?.to_ndarray()?.to_owned();
+        let detrended_log_base_fee_array =
+            df["detrended_log_base_fee"].f64()?.to_ndarray()?.to_owned();
         let season_param = c.least_squares(&detrended_log_base_fee_array)?.solution;
         let season = c.dot(&season_param);
-        let de_seasonalised_detrended_log_base_fee = df["detrended_log_base_fee"].f64()?.to_ndarray()?.to_owned() - season;
-        df.with_column(Series::new("de_seasonalized_detrended_log_base_fee", de_seasonalised_detrended_log_base_fee.clone().to_vec()))?;
+        let de_seasonalised_detrended_log_base_fee =
+            df["detrended_log_base_fee"].f64()?.to_ndarray()?.to_owned() - season;
+        df.with_column(Series::new(
+            "de_seasonalized_detrended_log_base_fee",
+            de_seasonalised_detrended_log_base_fee.clone().to_vec(),
+        ))?;
 
         // Fitting an ARIMA model to the deseasaonalized and detrended log base fee, finding a distribution for the residuals
         // ===============================================================================================
 
-        let timeseries = de_seasonalised_detrended_log_base_fee.as_slice().ok_or_else(|| err!("Can't convert to slice"))?;
+        // let timeseries = de_seasonalised_detrended_log_base_fee.as_slice().ok_or_else(|| err!("Can't convert to slice"))?;
 
-        // Fit the model
-        let ar = 12;
-        let d = 0;
-        let ma = 4;
-        let coefficients = fit(timeseries, ar, d, ma)?;
+        // // Fit the model
+        // let ar = 12;
+        // let d = 0;
+        // let ma = 4;
+        // let coefficients = fit(timeseries, ar, d, ma)?;
 
-        // Extract coefficients
-        let intercept = coefficients[0];
-        let phi = &coefficients[1..ar+1];
-        let theta = &coefficients[ar+1..];
+        // // Extract coefficients
+        // let intercept = coefficients[0];
+        // let phi = &coefficients[1..ar+1];
+        // let theta = &coefficients[ar+1..];
 
-        // Calculate residuals using the provided function
-        let residuals = residuals(&timeseries, intercept, Some(phi), Some(theta))?;
-       
-        println!("Coefficients: {:?}", coefficients);
-        println!("{:?}", Series::new("Residuals", residuals));
-        break;
+        // // Calculate residuals using the provided function
+        // let residuals = residuals(&timeseries, intercept, Some(phi), Some(theta))?;
+
+        // println!("Coefficients: {:?}", coefficients);
+        // println!("{:?}", Series::new("Residuals", residuals));
+        // break;
 
         // let residuals = df["de_seasonalized_detrended_log_base_fee"].f64()?.to_ndarray()?.to_owned() - Array1::from(arima_fitted_values);
         // let cond_variance = residuals.var(0.0); // ddof needs to match the default value in numpy
         // let standardized_residuals = residuals / cond_variance.sqrt();
+
+        // Monte Carlo Parameter Estimation for the MRJ model
+        // ===============================================================================================
+
+        let dt = 1.0 / (365.0 * 24.0);
+        let pt = de_seasonalised_detrended_log_base_fee
+            .slice(s![1..])
+            .to_owned();
+        let pt_1 = de_seasonalised_detrended_log_base_fee
+            .slice(s![..-1])
+            .to_owned();
+
+        let problem = MRJProblem { pt, pt_1, dt };
+        let x0 = vec![
+            0.0,
+            0.0,
+            0.7,
+            de_seasonalised_detrended_log_base_fee.var(0.0),
+            0.1,
+            0.005,
+        ];
+
+        let linesearch = MoreThuenteLineSearch::new().with_c(1e-4, 0.9)?;
+        let solver = LBFGS::new(linesearch, 7);
+
+        print!("{:?}", x0);
+        // break;
+
+        print!("Running optimization");
+        // Run solver
+        let res = Executor::new(problem, solver)
+            .configure(|state| state
+                .param(x0)
+                .max_iters(50)
+            )
+            .add_observer(SlogLogger::term(), ObserverMode::Always)
+            .run()?;
+
+        // Print result
+        println!("Optimal parameters: {:?}", res.state().best_param);
+        println!("Optimal cost: {}", res.state().best_cost);
     }
 
     Ok(())
+}
+
+fn laplace_pdf(x: f64, mu: f64, b: f64) -> f64 {
+    1.0 / (2.0 * b) * (-((x - mu).abs() / b)).exp()
+}
+
+fn mrjpdf(params: &Array1<f64>, pt: &Array1<f64>, pt_1: &Array1<f64>, dt: f64) -> Array1<f64> {
+    // let [a, phi, mu_j, sigma_sq, sigma_sq_j, lambda] = params[..6] else { panic!("Invalid params length") };
+    let [a, phi, mu_j, sigma_sq, sigma_sq_j, lambda] = params.slice(s![..6]).to_vec()[..] else {
+        panic!("Invalid params length")
+    };
+
+    let term1 = lambda
+        * pt.iter()
+            .zip(pt_1.iter())
+            .map(|(p, p1)| {
+                laplace_pdf(*p, a * dt + phi * p1 + mu_j, (sigma_sq + sigma_sq_j).sqrt())
+            })
+            .collect::<Array1<f64>>();
+
+    let term2 = (1.0 - lambda)
+        * pt.iter()
+            .zip(pt_1.iter())
+            .map(|(p, p1)| laplace_pdf(*p, a * dt + phi * p1, sigma_sq.sqrt()))
+            .collect::<Array1<f64>>();
+    term1 + term2
+}
+
+fn neg_log_likelihood(params: &Array1<f64>, pt: &Array1<f64>, pt_1: &Array1<f64>, dt: f64) -> f64 {
+    let pdf_vals = mrjpdf(params, pt, pt_1, dt);
+
+    let log_likelihood: f64 = pdf_vals.mapv(|v| (v + 1e-10).ln()).sum();
+
+    -log_likelihood
+}
+
+struct MRJProblem {
+    pt: Array1<f64>,
+    pt_1: Array1<f64>,
+    dt: f64,
+}
+
+impl CostFunction for MRJProblem {
+    type Param = Vec<f64>;
+    type Output = f64;
+
+    fn cost(&self, params: &Self::Param) -> Result<Self::Output, argmin::core::Error> {
+        let params_array = Array1::from(params.clone());
+        Ok(neg_log_likelihood(&params_array, &self.pt, &self.pt_1, self.dt))
+    }
+}
+
+impl Gradient for MRJProblem {
+    type Param = Vec<f64>;
+    type Gradient = Vec<f64>;
+
+    fn gradient(&self, p: &Self::Param) -> Result<Self::Gradient, argmin::core::Error> {
+        // Implement numerical gradient approximation
+        let epsilon = 1e-8;
+        let mut grad = vec![0.0; p.len()];
+        let f0 = self.cost(p)?;
+
+        for i in 0..p.len() {
+            let mut p_plus = p.clone();
+            p_plus[i] += epsilon;
+            let f_plus = self.cost(&p_plus)?;
+            grad[i] = (f_plus - f0) / epsilon;
+        }
+
+        Ok(grad)
+    }
 }
