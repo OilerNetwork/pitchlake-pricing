@@ -15,6 +15,7 @@ use ndarray::{stack, Array1, Array2, Axis};
 use ndarray_linalg::LeastSquaresSvd;
 use polars::prelude::*;
 use std::f64::consts::PI;
+use argmin_testfunctions::{rosenbrock, rosenbrock_derivative};
 
 fn read_csv(file: &str) -> PolarsResult<DataFrame> {
     CsvReadOptions::default()
@@ -293,7 +294,6 @@ fn main() -> Result<(), Error> {
             .slice(s![..-1])
             .to_owned();
 
-        let problem = MRJProblem { pt, pt_1, dt };
         let x0 = vec![
             0.0,
             0.0,
@@ -303,18 +303,27 @@ fn main() -> Result<(), Error> {
             0.005,
         ];
 
-        let linesearch = MoreThuenteLineSearch::new().with_c(1e-4, 0.9)?;
-        let solver = LBFGS::new(linesearch, 7);
+        // println!("X0 {:?}", x0);
+        // println!("Dt {:?}", dt);
+        // println!("Pt {:?}", pt);
+        // println!("Pt_1 {:?}", pt_1);
 
-        print!("{:?}", x0);
+        // let params_array = Array1::from(x0.clone());
+        // let initial_neg_log_likelihood = neg_log_likelihood(&params_array, &pt, &pt_1, dt);
+        // println!("Initial negative log-likelihood: {}", initial_neg_log_likelihood);
+
         // break;
+        // let problem = Rosenbrock{};
+        let problem = MRJProblem { pt, pt_1, dt };
+        let linesearch = MoreThuenteLineSearch::new();
+        let solver = LBFGS::new(linesearch, 5);
 
-        print!("Running optimization");
-        // Run solver
+
+
         let res = Executor::new(problem, solver)
             .configure(|state| state
-                .param(x0)
-                .max_iters(50)
+                .param(Array1::from(x0))
+                .max_iters(3)
             )
             .add_observer(SlogLogger::term(), ObserverMode::Always)
             .run()?;
@@ -331,7 +340,7 @@ fn laplace_pdf(x: f64, mu: f64, b: f64) -> f64 {
     1.0 / (2.0 * b) * (-((x - mu).abs() / b)).exp()
 }
 
-fn mrjpdf(params: &Array1<f64>, pt: &Array1<f64>, pt_1: &Array1<f64>, dt: f64) -> Array1<f64> {
+fn mrjpdf(params: Array1<f64>, pt: &Array1<f64>, pt_1: &Array1<f64>, dt: f64) -> Array1<f64> {
     // let [a, phi, mu_j, sigma_sq, sigma_sq_j, lambda] = params[..6] else { panic!("Invalid params length") };
     let [a, phi, mu_j, sigma_sq, sigma_sq_j, lambda] = params.slice(s![..6]).to_vec()[..] else {
         panic!("Invalid params length")
@@ -353,10 +362,10 @@ fn mrjpdf(params: &Array1<f64>, pt: &Array1<f64>, pt_1: &Array1<f64>, dt: f64) -
     term1 + term2
 }
 
-fn neg_log_likelihood(params: &Array1<f64>, pt: &Array1<f64>, pt_1: &Array1<f64>, dt: f64) -> f64 {
+fn neg_log_likelihood(params: Array1<f64>, pt: &Array1<f64>, pt_1: &Array1<f64>, dt: f64) -> f64 {
     let pdf_vals = mrjpdf(params, pt, pt_1, dt);
-
-    let log_likelihood: f64 = pdf_vals.mapv(|v| (v + 1e-10).ln()).sum();
+    
+    let log_likelihood: f64 = pdf_vals.mapv(|v| (v + 1e-1).ln()).sum();
 
     -log_likelihood
 }
@@ -368,32 +377,95 @@ struct MRJProblem {
 }
 
 impl CostFunction for MRJProblem {
-    type Param = Vec<f64>;
+    type Param = Array1<f64>;
     type Output = f64;
 
     fn cost(&self, params: &Self::Param) -> Result<Self::Output, argmin::core::Error> {
-        let params_array = Array1::from(params.clone());
-        Ok(neg_log_likelihood(&params_array, &self.pt, &self.pt_1, self.dt))
+        let res = neg_log_likelihood(params.clone(), &self.pt, &self.pt_1, self.dt);
+        
+        println!("Params: {:?}", params);
+        println!("Cost fn result: {:?}", res);
+        // println!("{:?}", &self.pt);
+        // println!("{:?}", &self.pt_1);
+        // println!("{:?}", &self.dt);
+        println!("\n");
+
+        Ok(res)
     }
 }
 
 impl Gradient for MRJProblem {
-    type Param = Vec<f64>;
-    type Gradient = Vec<f64>;
+    type Param = Array1<f64>;
+    type Gradient = Array1<f64>;
 
-    fn gradient(&self, p: &Self::Param) -> Result<Self::Gradient, argmin::core::Error> {
+    fn gradient(&self, params: &Self::Param) -> Result<Self::Gradient, argmin::core::Error> {
         // Implement numerical gradient approximation
+        // let epsilon = 1e-8;
+        // let mut grad = vec![0.0; p.len()];
+        // let f0 = self.cost(p)?;
+
+        // for i in 0..p.len() {
+        //     let mut p_plus = p.clone();
+        //     p_plus[i] += epsilon;
+        //     let f_plus = self.cost(&p_plus)?;
+        //     grad[i] = (f_plus - f0) / epsilon;
+        // }
+
+        // Ok(grad)
+
         let epsilon = 1e-8;
-        let mut grad = vec![0.0; p.len()];
-        let f0 = self.cost(p)?;
-
-        for i in 0..p.len() {
-            let mut p_plus = p.clone();
-            p_plus[i] += epsilon;
-            let f_plus = self.cost(&p_plus)?;
-            grad[i] = (f_plus - f0) / epsilon;
+        let mut grad = Array1::zeros(params.len());
+        for i in 0..params.len() {
+            let mut params_plus = params.clone();
+            params_plus[i] += epsilon;
+            let mut params_minus = params.clone();
+            params_minus[i] -= epsilon;
+            
+            let cost_plus = neg_log_likelihood(params_plus, &self.pt, &self.pt_1, self.dt);
+            let cost_minus = neg_log_likelihood(
+                params_minus, &self.pt, &self.pt_1, self.dt);
+            
+            grad[i] = (cost_plus - cost_minus) / (2.0 * epsilon);
         }
-
         Ok(grad)
     }
 }
+
+// impl CostFunction for MRJProblem {
+//     type Param = Vec<f64>;
+//     type Output = f64;
+
+//     fn cost(&self, params: &Self::Param) -> Result<Self::Output, argmin::core::Error> {
+//         // Simplified cost function
+//         Ok(params.iter().sum())
+//     }
+// }
+
+// impl Gradient for MRJProblem {
+//     type Param = Vec<f64>;
+//     type Gradient = Vec<f64>;
+
+//     fn gradient(&self, p: &Self::Param) -> Result<Self::Gradient, argmin::core::Error> {
+//         // Simplified gradient function
+//         Ok(vec![1.0; p.len()])
+//     }
+// }
+
+// struct Rosenbrock {}
+
+// impl CostFunction for MRJProblem {
+//     type Param = Array1<f64>;
+//     type Output = f64;
+
+//     fn cost(&self, p: &Self::Param) -> Result<Self::Output, Error> {
+//         Ok(rosenbrock(&p.to_vec()))
+//     }
+// }
+// impl Gradient for MRJProblem {
+//     type Param = Array1<f64>;
+//     type Gradient = Array1<f64>;
+
+//     fn gradient(&self, p: &Self::Param) -> Result<Self::Gradient, Error> {
+//         Ok(Array1::from(rosenbrock_derivative(&p.to_vec()).to_vec()))
+//     }
+// }

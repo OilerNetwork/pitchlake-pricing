@@ -18,7 +18,7 @@ def simulate_prices_and_payoff(df, strike, num_paths=15000, nPeriods=720, cap_le
     # ===============================================================================================
     df.dropna(inplace=True)
     df['log_base_fee'] = np.log(df['base_fee'])
-    df.reset_index(inplace=True )
+    df.reset_index(inplace=True)
 
     # Running a linear regression to discover the trend, then removing that trend from the log base fee
     # ===============================================================================================
@@ -79,11 +79,19 @@ def simulate_prices_and_payoff(df, strike, num_paths=15000, nPeriods=720, cap_le
         # Avoid log(0) by adding a small constant to pdf_vals
         log_likelihood = np.sum(np.log(pdf_vals + 1e-1))
         return -log_likelihood
+    
     x0 = [0, 0, 0.7, np.var(df['de_seasonalized_detrended_log_base_fee']), 0.1, 0.005]
+    # x0 = [-0.10687699614209123, 1623.0894971158705, -7.862335551687283, -3494.3353532126216, -1.6678530639386735, -1268.804171506291]
     
     print("\n")
     print("X0", x0)
+    print("Dt", dt)
+    print("Pt", Pt)
+    print("Pt_1", Pt_1)
     print("\n")
+
+    initial_neg_log_likelihood = neg_log_likelihood(x0, Pt, Pt_1, dt)
+    print("Initial negative log-likelihood:", initial_neg_log_likelihood)
 
     bounds = [
         (-np.inf, np.inf), 
@@ -102,6 +110,9 @@ def simulate_prices_and_payoff(df, strike, num_paths=15000, nPeriods=720, cap_le
     sigma_J = np.sqrt(params[4]) 
     lambda_ = params[5] / dt
 
+    print("Fitted params", params)
+
+    return "",""
 
     # Monte Carlo Simulation of the MRJ model
     # ===============================================================================================
@@ -117,7 +128,6 @@ def simulate_prices_and_payoff(df, strike, num_paths=15000, nPeriods=720, cap_le
     SimPriceDates = pd.date_range(last_date, periods=nPeriods, freq='H')
     SimHourlyTimes = (SimPriceDates - df['date'].iloc[0]).total_seconds() / 3600
 
-    return "",""
     # Adding seasonality back to the simulated prices
     # ===============================================================================================
     C = season_matrix(SimHourlyTimes)
@@ -216,7 +226,7 @@ for idx, period_df in enumerate(dfs):
     strike = period_df['TWAP_7d'].iloc[-1]  # Strike is at the money
     simulated_prices, premium = simulate_prices_and_payoff(period_df, strike)
 
-    sys.exit()
+    break
 
     if idx + 1 < len(dfs):
         next_period_df = dfs[idx + 1]
