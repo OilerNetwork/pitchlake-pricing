@@ -63,56 +63,46 @@ def simulate_prices_and_payoff(df, strike, num_paths=15000, nPeriods=720, cap_le
     Pt = df['de_seasonalized_detrended_log_base_fee'].values[1:]
     Pt_1 = df['de_seasonalized_detrended_log_base_fee'].values[:-1]
  
-
-    def laplace_pdf(x, mu, b):
-        return 1 / (2 * b) * np.exp(-np.abs(x - mu) / b)
-
-    def mrjpdf(params, Pt, Pt_1, dt):
+    # PDF for the discretized model
+    def mrjpdf(params, Pt, Pt_1):
         a, phi, mu_J, sigmaSq, sigmaSq_J, lambda_ = params
-        term1 = lambda_ * laplace_pdf(Pt, a * dt + phi * Pt_1 + mu_J, np.sqrt(sigmaSq + sigmaSq_J))
-        term2 = (1 - lambda_) * laplace_pdf(Pt, a * dt + phi * Pt_1, np.sqrt(sigmaSq))
-
+        term1 = lambda_ * np.exp(-(Pt - a - phi * Pt_1 - mu_J) ** 2 / (2 * (sigmaSq + sigmaSq_J))) / np.sqrt(2 * np.pi * (sigmaSq + sigmaSq_J))
+        term2 = (1 - lambda_) * np.exp(-(Pt - a - phi * Pt_1) ** 2 / (2 * sigmaSq)) / np.sqrt(2 * np.pi * sigmaSq)
         return term1 + term2
-    
-    def neg_log_likelihood(params, Pt, Pt_1, dt):
-        pdf_vals = mrjpdf(params, Pt, Pt_1, dt)
-        # Avoid log(0) by adding a small constant to pdf_vals
-        log_likelihood = np.sum(np.log(pdf_vals + 1e-1))
+
+    # Negative log-likelihood function
+    def neg_log_likelihood(params, Pt, Pt_1):
+        pdf_vals = mrjpdf(params, Pt, Pt_1)
+        log_likelihood = np.sum(np.log(pdf_vals + 1e-10))
         return -log_likelihood
-    
-    x0 = [0, 0, 0.7, np.var(df['de_seasonalized_detrended_log_base_fee']), 0.1, 0.005]
-    # x0 = [-0.10687699614209123, 1623.0894971158705, -7.862335551687283, -3494.3353532126216, -1.6678530639386735, -1268.804171506291]
-    
-    print("\n")
-    print("X0", x0)
-    print("Dt", dt)
-    print("Pt", Pt)
-    print("Pt_1", Pt_1)
-    print("\n")
 
-    initial_neg_log_likelihood = neg_log_likelihood(x0, Pt, Pt_1, dt)
-    print("Initial negative log-likelihood:", initial_neg_log_likelihood)
+    # Initial values
+    x0 = [-3.928e-02,  2.873e-04, 4.617e-02,  np.var(Pt), np.var(Pt), 4.999e-01]
+    bounds = [(-np.inf, np.inf), (0, 1), (0, np.inf), (0, np.inf), (0, np.inf), (0, 1)]
 
-    bounds = [
-        (-np.inf, np.inf), 
-        (-np.inf, 1), 
-        (0, np.inf), 
-        (0, np.inf), 
-        (0, np.inf), 
-        (0, 24)
-        ]
-    result = minimize(neg_log_likelihood, x0, args=(Pt, Pt_1, dt), bounds=bounds, method='L-BFGS-B')
+    def print_cost_function(params):
+        current_cost = neg_log_likelihood(params, Pt, Pt_1)
+        print(f"Params: {params}, Cost: {current_cost}")
+
+    result = minimize(neg_log_likelihood, x0, args=(Pt, Pt_1), bounds=bounds, method='L-BFGS-B', callback=print_cost_function, options={'disp': True})
+
+    # Obtain the calibrated parameters
     params = result.x
+    print(params)
     alpha = params[0] / dt
-    kappa = (1 - params[1]) / dt
+    kappa = (1-params[1])/dt
     mu_J = params[2]
     sigma = np.sqrt(params[3] / dt)
-    sigma_J = np.sqrt(params[4]) 
+    sigma_J = np.sqrt(params[4])
     lambda_ = params[5] / dt
 
-    print("Fitted params", params)
-
-    return "",""
+    print("Fitted params", result)
+    print('alpha:', alpha)
+    print('kappa:', kappa)
+    print('mu_J:', mu_J)
+    print('sigma:', sigma)
+    print('sigma_J:', sigma_J)
+    print('lambda_:', lambda_)
 
     # Monte Carlo Simulation of the MRJ model
     # ===============================================================================================
@@ -122,8 +112,13 @@ def simulate_prices_and_payoff(df, strike, num_paths=15000, nPeriods=720, cap_le
     SimPrices[0, :] = df['de_seasonalized_detrended_log_base_fee'].values[-1]
     n1 = np.random.normal(size=(nPeriods, num_paths)) #fitted from previous ARIMA analysis.
     n2 = np.random.normal(size=(nPeriods, num_paths))
+    
+    # Simulate the prices over time
     for i in range(1, nPeriods):
-        SimPrices[i, :] = alpha * dt + (1 - kappa * dt) * SimPrices[i - 1, :] + sigma * np.sqrt(dt) * n1[i, :] + j[i, :] * (mu_J + sigma_J * n2[i, :])
+        SimPrices[i, :] = alpha * dt + (1 - kappa * dt) * SimPrices[i - 1, :] + \
+                        sigma * np.sqrt(dt) * n1[i, :] + \
+                        j[i, :] * (mu_J + sigma_J * n2[i, :])
+        
     last_date = df['date'].iloc[-1]
     SimPriceDates = pd.date_range(last_date, periods=nPeriods, freq='H')
     SimHourlyTimes = (SimPriceDates - df['date'].iloc[0]).total_seconds() / 3600
@@ -183,7 +178,7 @@ def simulate_prices_and_payoff(df, strike, num_paths=15000, nPeriods=720, cap_le
     plt.legend()
     plt.grid(False)
     plt.tight_layout()
-    #plt.show()
+    plt.show()
 
     # Plot a histogram of the final simulated prices
     plt.figure(figsize=(10, 6))
@@ -193,12 +188,12 @@ def simulate_prices_and_payoff(df, strike, num_paths=15000, nPeriods=720, cap_le
     plt.xlabel('Base Fee')
     plt.ylabel('Frequency')
     plt.grid(False)
-    #plt.show()
+    plt.show()
 
     return simulated_df_twap, present_value
 
 # Example usage:
-df = pd.read_csv('../data.csv')  # Ensure your data.csv has 'timestamp' and 'base_fee' columns
+df = pd.read_csv('./data.csv')  # Ensure your data.csv has 'timestamp' and 'base_fee' columns
 df['date'] = pd.to_datetime(df['timestamp'], unit='s')
 df = df.set_index('date').resample('h').mean().reset_index()
 df['TWAP_7d'] = df['base_fee'].rolling(window=24 * 7).mean()
@@ -226,7 +221,6 @@ for idx, period_df in enumerate(dfs):
     strike = period_df['TWAP_7d'].iloc[-1]  # Strike is at the money
     simulated_prices, premium = simulate_prices_and_payoff(period_df, strike)
 
-    break
 
     if idx + 1 < len(dfs):
         next_period_df = dfs[idx + 1]
