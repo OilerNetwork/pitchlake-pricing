@@ -1,10 +1,4 @@
 use anyhow::{anyhow as err, Error};
-use argmin::core::Gradient;
-use argmin::{
-    core::{CostFunction, Executor, observers::ObserverMode},
-    solver::{linesearch::MoreThuenteLineSearch, quasinewton::LBFGS},
-};
-use argmin_observer_slog::SlogLogger;
 use chrono::prelude::*;
 use chrono::Months;
 use linfa::prelude::*;
@@ -15,7 +9,9 @@ use ndarray::{stack, Array1, Array2, Axis};
 use ndarray_linalg::LeastSquaresSvd;
 use polars::prelude::*;
 use std::f64::consts::PI;
-use argmin_testfunctions::{rosenbrock, rosenbrock_derivative};
+extern crate optimization;
+
+use optimization::{Minimizer, GradientDescent, NumericalDifferentiation, Func};
 
 fn read_csv(file: &str) -> PolarsResult<DataFrame> {
     CsvReadOptions::default()
@@ -294,178 +290,61 @@ fn main() -> Result<(), Error> {
             .slice(s![..-1])
             .to_owned();
 
-        let x0 = vec![
-            0.0,
-            0.0,
-            0.7,
-            de_seasonalised_detrended_log_base_fee.var(0.0),
-            0.1,
-            0.005,
-        ];
+        let pt_array = pt.clone(); // `pt` is already an `Array1<f64>`
 
-        // println!("X0 {:?}", x0);
-        // println!("Dt {:?}", dt);
-        // println!("Pt {:?}", pt);
-        // println!("Pt_1 {:?}", pt_1);
+        let function = NumericalDifferentiation::new(Func(|x: &[f64]| {
+            neg_log_likelihood(x, &pt, &pt_1)
+        }));
 
-        // let params_array = Array1::from(x0.clone());
-        // let initial_neg_log_likelihood = neg_log_likelihood(&params_array, &pt, &pt_1, dt);
-        // println!("Initial negative log-likelihood: {}", initial_neg_log_likelihood);
+        let minimizer = GradientDescent::new().max_iterations(Some(300));
 
-        // break;
-        // let problem = Rosenbrock{};
-        let problem = MRJProblem { pt, pt_1, dt };
-        let linesearch = MoreThuenteLineSearch::new();
-        let solver = LBFGS::new(linesearch, 5);
+        let var_pt = pt.var(0.0);  // The 0.0 here refers to the degrees of freedom, equivalent to ddof in numpy
+        let solution = minimizer.minimize(&function, vec![-3.928e-02, 2.873e-04, 4.617e-02, var_pt, var_pt, 0.2]);
 
+        println!("Found solution for Rosenbrock function at f({:?}) = {:?}",
+            solution.position, solution.value);
 
+        let params = &solution.position; // Get the optimized parameters
+        let alpha = params[0] / dt;
+        let kappa = (1.0 - params[1]) / dt;
+        let mu_j = params[2];
+        let sigma = (params[3] / dt).sqrt();
+        let sigma_j = params[4].sqrt();
+        let lambda_ = params[5] / dt;
+    
+        println!("Fitted params: {:?}", params);
+        println!("alpha: {}", alpha);
+        println!("kappa: {}", kappa);
+        println!("mu_J: {}", mu_j);
+        println!("sigma: {}", sigma);
+        println!("sigma_J: {}", sigma_j);
+        println!("lambda_: {}", lambda_);
 
-        let res = Executor::new(problem, solver)
-            .configure(|state| state
-                .param(Array1::from(x0))
-                .max_iters(3)
-            )
-            .add_observer(SlogLogger::term(), ObserverMode::Always)
-            .run()?;
-
-        // Print result
-        println!("Optimal parameters: {:?}", res.state().best_param);
-        println!("Optimal cost: {}", res.state().best_cost);
     }
 
     Ok(())
 }
 
-fn laplace_pdf(x: f64, mu: f64, b: f64) -> f64 {
-    1.0 / (2.0 * b) * (-((x - mu).abs() / b)).exp()
-}
-
-fn mrjpdf(params: Array1<f64>, pt: &Array1<f64>, pt_1: &Array1<f64>, dt: f64) -> Array1<f64> {
-    // let [a, phi, mu_j, sigma_sq, sigma_sq_j, lambda] = params[..6] else { panic!("Invalid params length") };
-    let [a, phi, mu_j, sigma_sq, sigma_sq_j, lambda] = params.slice(s![..6]).to_vec()[..] else {
-        panic!("Invalid params length")
-    };
+// Function to compute the mean-reverting jump diffusion PDF
+fn mrjpdf(params: &[f64], pt: &Array1<f64>, pt_1: &Array1<f64>) -> Array1<f64> {
+    let (a, phi, mu_j, sigma_sq, sigma_sq_j, lambda) = (
+        params[0], params[1], params[2], params[3], params[4], params[5],
+    );
 
     let term1 = lambda
-        * pt.iter()
-            .zip(pt_1.iter())
-            .map(|(p, p1)| {
-                laplace_pdf(*p, a * dt + phi * p1 + mu_j, (sigma_sq + sigma_sq_j).sqrt())
-            })
-            .collect::<Array1<f64>>();
+        * (-((pt - a - phi * pt_1 - mu_j).mapv(|x| x.powi(2))) / (2.0 * (sigma_sq + sigma_sq_j)))
+            .mapv(f64::exp)
+        / ((2.0 * std::f64::consts::PI * (sigma_sq + sigma_sq_j)).sqrt());
 
     let term2 = (1.0 - lambda)
-        * pt.iter()
-            .zip(pt_1.iter())
-            .map(|(p, p1)| laplace_pdf(*p, a * dt + phi * p1, sigma_sq.sqrt()))
-            .collect::<Array1<f64>>();
+        * (-((pt - a - phi * pt_1).mapv(|x| x.powi(2))) / (2.0 * sigma_sq)).mapv(f64::exp)
+        / ((2.0 * std::f64::consts::PI * sigma_sq).sqrt());
+
     term1 + term2
 }
 
-fn neg_log_likelihood(params: Array1<f64>, pt: &Array1<f64>, pt_1: &Array1<f64>, dt: f64) -> f64 {
-    let pdf_vals = mrjpdf(params, pt, pt_1, dt);
-    
-    let log_likelihood: f64 = pdf_vals.mapv(|v| (v + 1e-1).ln()).sum();
-
-    -log_likelihood
+// Negative log-likelihood function for the mean-reverting jump diffusion process
+fn neg_log_likelihood(params: &[f64], pt: &Array1<f64>, pt_1: &Array1<f64>) -> f64 {
+    let pdf_vals = mrjpdf(params, pt, pt_1);
+    -pdf_vals.mapv(|x| (x + 1e-10).ln()).sum()
 }
-
-struct MRJProblem {
-    pt: Array1<f64>,
-    pt_1: Array1<f64>,
-    dt: f64,
-}
-
-impl CostFunction for MRJProblem {
-    type Param = Array1<f64>;
-    type Output = f64;
-
-    fn cost(&self, params: &Self::Param) -> Result<Self::Output, argmin::core::Error> {
-        let res = neg_log_likelihood(params.clone(), &self.pt, &self.pt_1, self.dt);
-        
-        println!("Params: {:?}", params);
-        println!("Cost fn result: {:?}", res);
-        // println!("{:?}", &self.pt);
-        // println!("{:?}", &self.pt_1);
-        // println!("{:?}", &self.dt);
-        println!("\n");
-
-        Ok(res)
-    }
-}
-
-impl Gradient for MRJProblem {
-    type Param = Array1<f64>;
-    type Gradient = Array1<f64>;
-
-    fn gradient(&self, params: &Self::Param) -> Result<Self::Gradient, argmin::core::Error> {
-        // Implement numerical gradient approximation
-        // let epsilon = 1e-8;
-        // let mut grad = vec![0.0; p.len()];
-        // let f0 = self.cost(p)?;
-
-        // for i in 0..p.len() {
-        //     let mut p_plus = p.clone();
-        //     p_plus[i] += epsilon;
-        //     let f_plus = self.cost(&p_plus)?;
-        //     grad[i] = (f_plus - f0) / epsilon;
-        // }
-
-        // Ok(grad)
-
-        let epsilon = 1e-8;
-        let mut grad = Array1::zeros(params.len());
-        for i in 0..params.len() {
-            let mut params_plus = params.clone();
-            params_plus[i] += epsilon;
-            let mut params_minus = params.clone();
-            params_minus[i] -= epsilon;
-            
-            let cost_plus = neg_log_likelihood(params_plus, &self.pt, &self.pt_1, self.dt);
-            let cost_minus = neg_log_likelihood(
-                params_minus, &self.pt, &self.pt_1, self.dt);
-            
-            grad[i] = (cost_plus - cost_minus) / (2.0 * epsilon);
-        }
-        Ok(grad)
-    }
-}
-
-// impl CostFunction for MRJProblem {
-//     type Param = Vec<f64>;
-//     type Output = f64;
-
-//     fn cost(&self, params: &Self::Param) -> Result<Self::Output, argmin::core::Error> {
-//         // Simplified cost function
-//         Ok(params.iter().sum())
-//     }
-// }
-
-// impl Gradient for MRJProblem {
-//     type Param = Vec<f64>;
-//     type Gradient = Vec<f64>;
-
-//     fn gradient(&self, p: &Self::Param) -> Result<Self::Gradient, argmin::core::Error> {
-//         // Simplified gradient function
-//         Ok(vec![1.0; p.len()])
-//     }
-// }
-
-// struct Rosenbrock {}
-
-// impl CostFunction for MRJProblem {
-//     type Param = Array1<f64>;
-//     type Output = f64;
-
-//     fn cost(&self, p: &Self::Param) -> Result<Self::Output, Error> {
-//         Ok(rosenbrock(&p.to_vec()))
-//     }
-// }
-// impl Gradient for MRJProblem {
-//     type Param = Array1<f64>;
-//     type Gradient = Array1<f64>;
-
-//     fn gradient(&self, p: &Self::Param) -> Result<Self::Gradient, Error> {
-//         Ok(Array1::from(rosenbrock_derivative(&p.to_vec()).to_vec()))
-//     }
-// }
