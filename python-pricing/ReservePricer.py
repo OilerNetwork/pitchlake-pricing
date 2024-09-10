@@ -108,11 +108,12 @@ def simulate_prices_and_payoff(df, strike, num_paths=15000, nPeriods=720, cap_le
     # ===============================================================================================
     nPeriods = 30 * 24 
     j = np.random.binomial(1, lambda_ * dt, (nPeriods, num_paths))
+    
     SimPrices = np.zeros((nPeriods, num_paths))
     SimPrices[0, :] = df['de_seasonalized_detrended_log_base_fee'].values[-1]
-    n1 = np.random.normal(size=(nPeriods, num_paths)) #fitted from previous ARIMA analysis.
+    n1 = np.random.normal(size=(nPeriods, num_paths))
     n2 = np.random.normal(size=(nPeriods, num_paths))
-    
+
     # Simulate the prices over time
     for i in range(1, nPeriods):
         SimPrices[i, :] = alpha * dt + (1 - kappa * dt) * SimPrices[i - 1, :] + \
@@ -134,6 +135,7 @@ def simulate_prices_and_payoff(df, strike, num_paths=15000, nPeriods=720, cap_le
     # =============================================================================================== 
     df['log_TWAP_7d'] = np.log(df['TWAP_7d'])
     returns = df['log_TWAP_7d'].diff().dropna()
+
     mu = 0.05 / 52 # Weekly drift
     sigma = returns.std() * np.sqrt(24 * 7)  # Weekly volatility
     dt = 1 / 24  # Time step in hours
@@ -155,6 +157,7 @@ def simulate_prices_and_payoff(df, strike, num_paths=15000, nPeriods=720, cap_le
     simulated_df_twap = simulated_df.rolling(window=24 * 7).mean()
     simulated_df_twap.dropna(inplace=True)
     final_prices_twap = simulated_df_twap.iloc[-1]
+
 
     # Option Pricing and Present Value Calculation
     # ===============================================================================================    
@@ -193,7 +196,7 @@ def simulate_prices_and_payoff(df, strike, num_paths=15000, nPeriods=720, cap_le
     return simulated_df_twap, present_value
 
 # Example usage:
-df = pd.read_csv('./data.csv')  # Ensure your data.csv has 'timestamp' and 'base_fee' columns
+df = pd.read_csv('../data.csv')  # Ensure your data.csv has 'timestamp' and 'base_fee' columns
 df['date'] = pd.to_datetime(df['timestamp'], unit='s')
 df = df.set_index('date').resample('h').mean().reset_index()
 df['TWAP_7d'] = df['base_fee'].rolling(window=24 * 7).mean()
@@ -220,7 +223,6 @@ to_export = []
 for idx, period_df in enumerate(dfs):
     strike = period_df['TWAP_7d'].iloc[-1]  # Strike is at the money
     simulated_prices, premium = simulate_prices_and_payoff(period_df, strike)
-
 
     if idx + 1 < len(dfs):
         next_period_df = dfs[idx + 1]
