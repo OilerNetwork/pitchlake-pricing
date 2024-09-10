@@ -97,22 +97,27 @@ fn neg_log_likelihood(params: &[f64], pt: &Array1<f64>, pt_1: &Array1<f64>) -> f
     -pdf_vals.mapv(|x| (x + 1e-10).ln()).sum()
 }
 
-fn main() -> Result<(), Error> {
-    let data_file = "data.csv";
+fn add_twap_7d(df: DataFrame) -> Result<DataFrame, Error> {
+    let df = df
+        .lazy()
+        .with_column(
+            col("base_fee")
+                .rolling_mean(RollingOptionsFixedWindow {
+                    window_size: 24 * 7,
+                    min_periods: 24 * 7,
+                    weights: None,
+                    center: false,
+                    fn_params: None,
+                })
+                .alias("TWAP_7d"),
+        )
+        .collect()?;
 
-    let mut df: DataFrame = read_csv(data_file).expect("Cannot read file");
+    Ok(df)
+}
 
-    let dates = df
-        .column("timestamp")?
-        .i64()?
-        .apply(|s| s.map(|s| s * 1000)) // convert into milliseconds
-        .into_series()
-        .cast(&DataType::Datetime(TimeUnit::Milliseconds, None))?;
-
-    df.replace("timestamp", dates)?;
-    df.rename("timestamp", "date")?;
-
-    df = df
+fn group_by_1h_intervals(df: DataFrame) -> Result<DataFrame, Error> {
+    let df = df
         .lazy()
         .group_by_dynamic(
             col("date"),
@@ -132,20 +137,26 @@ fn main() -> Result<(), Error> {
         ])
         .collect()?;
 
-    df = df
-        .lazy()
-        .with_column(
-            col("base_fee")
-                .rolling_mean(RollingOptionsFixedWindow {
-                    window_size: 24 * 7,
-                    min_periods: 24 * 7,
-                    weights: None,
-                    center: false,
-                    fn_params: None,
-                })
-                .alias("TWAP_7d"),
-        )
-        .collect()?;
+    Ok(df)
+}
+
+fn main() -> Result<(), Error> {
+    let data_file = "data.csv";
+
+    let mut df: DataFrame = read_csv(data_file).expect("Cannot read file");
+
+    let dates = df
+        .column("timestamp")?
+        .i64()?
+        .apply(|s| s.map(|s| s * 1000)) // convert into milliseconds
+        .into_series()
+        .cast(&DataType::Datetime(TimeUnit::Milliseconds, None))?;
+
+    df.replace("timestamp", dates)?;
+    df.rename("timestamp", "date")?;
+
+    df = group_by_1h_intervals(df)?;
+    df = add_twap_7d(df)?;
 
     let mut dfs: Vec<DataFrame> = Vec::new();
 
