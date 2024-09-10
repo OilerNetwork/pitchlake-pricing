@@ -154,16 +154,37 @@ fn replace_timestamp_with_date(mut df: DataFrame) -> Result<DataFrame, Error> {
     Ok(df)
 }
 
-fn main() -> Result<(), Error> {
-    let data_file = "data.csv";
-
-    let mut df: DataFrame = read_csv(data_file).expect("Cannot read file");
-
-    df = replace_timestamp_with_date(df)?;
-    df = group_by_1h_intervals(df)?;
-    df = add_twap_7d(df)?;
-
-    let mut dfs: Vec<DataFrame> = Vec::new();
+/// Splits a DataFrame into overlapping periods of a specified length.
+///
+/// This function takes a DataFrame and splits it into multiple overlapping periods,
+/// each with a duration specified by `period_length_in_months`.
+///
+/// # Arguments
+///
+/// * `df` - The input DataFrame to be split. It must contain a 'date' column.
+/// * `period_length_in_months` - The length of each period in months.
+///
+/// # Returns
+///
+/// A `Result` containing a vector of DataFrames, each representing a period,
+/// or an `Error` if the operation fails.
+///
+/// # Errors
+///
+/// This function will return an error if:
+/// * The 'date' column is missing or cannot be accessed.
+/// * The start or end dates cannot be calculated.
+/// * The DataFrame cannot be filtered or collected for any period.
+///
+/// # Example
+///
+/// ```
+/// let df = // ... create or load your DataFrame
+/// let period_length = 3; // 3-month periods
+/// let period_dfs = split_dataframe_into_periods(df, period_length)?;
+/// ```
+fn split_dataframe_into_periods(df: DataFrame, period_length_in_months: i32) -> Result<Vec<DataFrame>, Error> {
+    let mut period_dataframes: Vec<DataFrame> = Vec::new();
 
     let start_date_value = df
         .column("date")?
@@ -186,9 +207,9 @@ fn main() -> Result<(), Error> {
         - i32::try_from(start_date.month())?
         + 1;
 
-    for i in 0..num_months - 4 {
+    for i in 0..num_months - (period_length_in_months - 1) {
         let period_start = start_date + Months::new(i as u32);
-        let period_end = period_start + Months::new(5);
+        let period_end = period_start + Months::new(period_length_in_months as u32);
         let period_df = df
             .clone()
             .lazy()
@@ -199,12 +220,27 @@ fn main() -> Result<(), Error> {
             )
             .collect()?;
 
-        dfs.push(period_df);
+        period_dataframes.push(period_df);
     }
+
+    Ok(period_dataframes)
+}
+
+fn main() -> Result<(), Error> {
+    let data_file = "data.csv";
+
+    let mut df: DataFrame = read_csv(data_file).expect("Cannot read file");
+
+    df = replace_timestamp_with_date(df)?;
+    df = group_by_1h_intervals(df)?;
+    df = add_twap_7d(df)?;
+
+    // Split dataframe into overlapping X month periods
+    let overlapping_periods_dataframes = split_dataframe_into_periods(df, 5)?;
 
     let mut to_export = Vec::<Period>::new();
 
-    for (idx, period_df) in dfs.iter().enumerate().take(1) {
+    for (idx, period_df) in overlapping_periods_dataframes.iter().enumerate().take(1) {
         let twap_7d_series = period_df.column("TWAP_7d")?;
         let strike = twap_7d_series
             .f64()?
@@ -394,7 +430,7 @@ fn main() -> Result<(), Error> {
             .column("date")?
             .datetime()?
             .get(df.height() - 1)
-            .ok_or_else(|| err!("No row {end_date_row} in the date column"))?;
+            .ok_or_else(|| err!("No row {} in the date column", df.height() - 1))?;
 
         let start_date_value = df
             .column("date")?
@@ -499,8 +535,8 @@ fn main() -> Result<(), Error> {
         let mut settlement_price = 0.0;
         let mut ending_timestamp = 0;
 
-        if idx + 1 < dfs.len() {
-            let next_period_df = dfs[idx + 1].clone();
+        if idx + 1 < overlapping_periods_dataframes.len() {
+            let next_period_df = overlapping_periods_dataframes[idx + 1].clone();
             settlement_price = next_period_df.column("TWAP_7d")?.f64()?.last().unwrap();
             ending_timestamp = next_period_df.column("date")?.datetime()?.last().unwrap();
         }
