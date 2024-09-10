@@ -140,11 +140,7 @@ fn group_by_1h_intervals(df: DataFrame) -> Result<DataFrame, Error> {
     Ok(df)
 }
 
-fn main() -> Result<(), Error> {
-    let data_file = "data.csv";
-
-    let mut df: DataFrame = read_csv(data_file).expect("Cannot read file");
-
+fn replace_timestamp_with_date(mut df: DataFrame) -> Result<DataFrame, Error> {
     let dates = df
         .column("timestamp")?
         .i64()?
@@ -154,7 +150,16 @@ fn main() -> Result<(), Error> {
 
     df.replace("timestamp", dates)?;
     df.rename("timestamp", "date")?;
+    
+    Ok(df)
+}
 
+fn main() -> Result<(), Error> {
+    let data_file = "data.csv";
+
+    let mut df: DataFrame = read_csv(data_file).expect("Cannot read file");
+
+    df = replace_timestamp_with_date(df)?;
     df = group_by_1h_intervals(df)?;
     df = add_twap_7d(df)?;
 
@@ -199,7 +204,7 @@ fn main() -> Result<(), Error> {
 
     let mut to_export = Vec::<Period>::new();
 
-    for (idx, period_df) in dfs.iter().enumerate() {
+    for (idx, period_df) in dfs.iter().enumerate().take(1) {
         let twap_7d_series = period_df.column("TWAP_7d")?;
         let strike = twap_7d_series
             .f64()?
@@ -510,6 +515,6 @@ fn main() -> Result<(), Error> {
         });
     }
 
-    println!("Output:\n{:?}", to_export);
+    // println!("Output:\n{:?}", to_export);
     Ok(())
 }
