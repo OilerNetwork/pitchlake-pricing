@@ -3,7 +3,7 @@ use chrono::prelude::*;
 use chrono::Months;
 use linfa::prelude::*;
 use linfa::traits::Fit;
-use linfa_linear::LinearRegression;
+use linfa_linear::{LinearRegression, FittedLinearRegression};
 use ndarray::prelude::*;
 use ndarray::{stack, Array1, Array2, Axis};
 use ndarray_linalg::LeastSquaresSvd;
@@ -40,6 +40,8 @@ fn main() -> Result<(), Error> {
     let mut to_export = Vec::<Period>::new();
 
     for (idx, period_df) in overlapping_periods_dataframes.iter().enumerate().take(1) {
+        println!{"Simulating prices  for period {}", idx};
+        
         let twap_7d_series = period_df.column("TWAP_7d")?;
         let strike = twap_7d_series
             .f64()?
@@ -54,57 +56,17 @@ fn main() -> Result<(), Error> {
         // Data Cleaning and Preprocessing - removing null if exist and log transformation
         // ===============================================================================================
 
-        // drop rows with null values
-        let mut df = period_df
-            .clone()
-            .lazy()
-            .filter(col("TWAP_7d").is_not_null())
-            .collect()?;
+        let mut df = drop_nulls(&period_df, "TWAP_7d")?;
 
-        let log_base_fees: Vec<f64> = df
-            .column("base_fee")?
-            .f64()?
-            .into_no_null_iter()
-            .map(|x| x.ln())
-            .collect();
-        df.with_column(Series::new("log_base_fee", log_base_fees))?;
+        // The base fee logarithm is necessary to stabilize variance and make the data more suitable for linear regression analysis
+        let log_base_fee = compute_log_of_base_fees(&df)?;
+        df.with_column(Series::new("log_base_fee", log_base_fee))?;
 
         // Running a linear regression to discover the trend, then removing that trend from the log base fee
         // ===============================================================================================
-
-        let time_index_series = Series::new("time_index", (0..df.height() as i64).into_iter());
-        df.with_column(time_index_series)?;
-
-        let ones = Array::<f64, Ix1>::ones(df.height() as usize);
-        let x = stack![
-            Axis(1),
-            Array::from(
-                df["time_index"]
-                    .cast(&DataType::Float64)?
-                    .f64()?
-                    .into_no_null_iter()
-                    .collect::<Vec<f64>>()
-            ),
-            ones
-        ];
-
-        let y = Array1::from(
-            df["log_base_fee"]
-                .f64()?
-                .into_no_null_iter()
-                .collect::<Vec<f64>>(),
-        );
-
-        let dataset = Dataset::<f64, f64, Ix1>::new(x.clone(), y);
-        let trend_model = LinearRegression::default()
-            .with_intercept(false)
-            .fit(&dataset)?;
-
-        df.with_column(Series::new(
-            "trend",
-            trend_model.predict(x).targets().to_vec(),
-        ))?;
-
+        
+        let (trend_model, trend_values) = discover_trend(&df)?;
+        df.with_column(Series::new("trend", trend_values))?;
         df.with_column(Series::new(
             "detrended_log_base_fee",
             df["log_base_fee"].f64()? - df["trend"].f64()?,
@@ -350,8 +312,82 @@ fn main() -> Result<(), Error> {
         });
     }
 
-    // println!("Output:\n{:?}", to_export);
+    for (index, period) in to_export.iter().enumerate() {
+        println!("Period {}:", index);
+        println!("  Starting timestamp: {:?}", period.starting_timestamp);
+        println!("  Ending timestamp: {:?}", period.ending_timestamp);
+        println!("  Reserve price: {}", period.reserve_price);
+        println!("  Strike price: {}", period.strike_price);
+        println!("  Settlement price: {}", period.settlement_price);
+        println!("  Cap level: {}", period.cap_level);
+        println!();
+    }
     Ok(())
+}
+
+/// Discovers the trend in the log base fee data using linear regression.
+///
+/// # Arguments
+///
+/// * `df` - A reference to a DataFrame containing the log base fee data.
+///
+/// # Returns
+///
+/// A Result containing a tuple with:
+/// * The fitted linear regression model.
+/// * A vector of trend values corresponding to the input data points.
+///
+/// # Errors
+///
+/// Returns an Error if:
+/// * The 'log_base_fee' column cannot be accessed or converted to f64.
+/// * The linear regression model fails to fit.
+fn discover_trend(df: &DataFrame) -> Result<(FittedLinearRegression<f64>, Vec<f64>), Error> {
+    let time_index: Vec<f64> = (0..df.height() as i64).map(|i| i as f64).collect();
+
+    let ones = Array::<f64, Ix1>::ones(df.height() as usize);
+    let x = stack![
+        Axis(1),
+        Array::from(time_index.clone()),
+        ones
+    ];
+
+    let y = Array1::from(
+        df["log_base_fee"]
+            .f64()?
+            .into_no_null_iter()
+            .collect::<Vec<f64>>(),
+    );
+
+    let dataset = Dataset::<f64, f64, Ix1>::new(x.clone(), y);
+    let trend_model = LinearRegression::default()
+        .with_intercept(false)
+        .fit(&dataset)?;
+
+    let trend_values = trend_model.predict(&x).as_targets().to_vec();
+
+    Ok((trend_model, trend_values))
+}
+
+// Computes the natural logarithm of 'base_fee' values
+fn compute_log_of_base_fees(df: &DataFrame) -> Result<Vec<f64>, Error> {
+    let log_base_fees: Vec<f64> = df
+        .column("base_fee")?
+        .f64()?
+        .into_no_null_iter()
+        .map(|x| x.ln())
+        .collect();
+    Ok(log_base_fees)
+}
+
+// Removes rows with null values in the specified column and returns a new DataFrame
+fn drop_nulls(df: &DataFrame, column_name: &str) -> Result<DataFrame, Error> {
+    let df = df.clone()
+        .lazy()
+        .filter(col(column_name).is_not_null())
+        .collect()?;
+
+    Ok(df)
 }
 
 fn read_csv(file: &str) -> PolarsResult<DataFrame> {
