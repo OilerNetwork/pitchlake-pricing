@@ -32,6 +32,33 @@ fn read_csv(file: &str) -> PolarsResult<DataFrame> {
         .finish()
 }
 
+/// Creates a seasonal matrix for time series analysis.
+///
+/// This function generates a matrix of seasonal components based on the input time array.
+/// It calculates various sine and cosine terms to capture daily and weekly seasonality patterns.
+///
+/// # Arguments
+///
+/// * `t` - An `Array1<f64>` representing the time points for which to generate the seasonal matrix.
+///
+/// # Returns
+///
+/// An `Array2<f64>` containing the seasonal components. Each column represents a different
+/// seasonal term, and each row corresponds to a time point in the input array.
+///
+/// # Seasonal Components
+///
+/// The function calculates the following seasonal components:
+/// - Daily components: sin(2πt/24), cos(2πt/24), sin(4πt/24), cos(4πt/24), sin(8πt/24), cos(8πt/24)
+/// - Weekly components: sin(2πt/(24*7)), cos(2πt/(24*7)), sin(4πt/(24*7)), cos(4πt/(24*7)), sin(8πt/(24*7)), cos(8πt/(24*7))
+///
+/// # Example
+///
+/// ```
+/// use ndarray::Array1;
+/// let time_array = Array1::linspace(0.0, 24.0, 25);
+/// let seasonal_matrix = season_matrix(time_array);
+/// ```
 fn season_matrix(t: Array1<f64>) -> Array2<f64> {
     let sin_2pi_24 = t.mapv(|time| (2.0 * PI * time / 24.0).sin());
     let cos_2pi_24 = t.mapv(|time| (2.0 * PI * time / 24.0).cos());
@@ -63,17 +90,56 @@ fn season_matrix(t: Array1<f64>) -> Array2<f64> {
     ]
 }
 
+/// Calculates the standard deviation of a vector of floating-point numbers.
+///
+/// This function computes the sample standard deviation of the input vector.
+/// It uses the n-1 formula for sample standard deviation, which is more
+/// appropriate for estimating the standard deviation of a population
+/// from a sample.
+///
+/// # Arguments
+///
+/// * `returns` - A vector of f64 values representing the data points.
+///
+/// # Returns
+///
+/// * `f64` - The calculated sample standard deviation.
+///
+/// # Notes
+///
+/// - This function uses the two-pass algorithm to compute the variance,
+///   which can be more numerically stable for large datasets.
+/// - If the input vector has fewer than two elements, the function will
+///   return 0.0 to avoid division by zero.
 fn standard_deviation(returns: Vec<f64>) -> f64 {
     let n = returns.len() as f64;
-    // Calculate mean
+    if n < 2.0 {
+        return 0.0; // Return 0 for vectors with less than 2 elements
+    }
     let mean = returns.iter().sum::<f64>() / n;
-    // Calculate sum of squared differences
-    let variance = returns.iter().map(|&x| (x - mean).powi(2)).sum::<f64>() / (n - 1.0); // Use n-1 for sample standard deviation
-    // Return the square root of variance
+    let variance = returns.iter().map(|&x| (x - mean).powi(2)).sum::<f64>() / (n - 1.0);
     variance.sqrt()
 }
 
-// Function to compute the mean-reverting jump diffusion PDF
+/// Calculates the probability density function (PDF) for the Mean-Reverting Jump (MRJ) model.
+///
+/// This function computes the PDF of the MRJ model given the model parameters and observed prices.
+///
+/// # Arguments
+///
+/// * `params` - A slice of f64 values representing the model parameters:
+///   [a, phi, mu_j, sigma_sq, sigma_sq_j, lambda]
+/// * `pt` - An Array1<f64> of observed prices at time t
+/// * `pt_1` - An Array1<f64> of observed prices at time t-1
+///
+/// # Returns
+///
+/// * `Array1<f64>` - The calculated PDF values
+///
+/// # Notes
+///
+/// The MRJ model combines a mean-reverting process with a jump component. The PDF is a mixture
+/// of two normal distributions, weighted by the jump probability (lambda).
 fn mrjpdf(params: &[f64], pt: &Array1<f64>, pt_1: &Array1<f64>) -> Array1<f64> {
     let (a, phi, mu_j, sigma_sq, sigma_sq_j, lambda) = (
         params[0], params[1], params[2], params[3], params[4], params[5],
@@ -91,12 +157,51 @@ fn mrjpdf(params: &[f64], pt: &Array1<f64>, pt_1: &Array1<f64>) -> Array1<f64> {
     term1 + term2
 }
 
-// Negative log-likelihood function for the mean-reverting jump diffusion process
+/// Calculates the negative log-likelihood for the mean-reverting jump diffusion model.
+///
+/// This function computes the negative log-likelihood of the observed data given the model parameters.
+/// It's used in parameter estimation for the mean-reverting jump diffusion model.
+///
+/// # Arguments
+///
+/// * `params` - A slice of f64 values representing the model parameters:
+///   [a, phi, mu_j, sigma_sq, sigma_sq_j, lambda]
+/// * `pt` - An Array1<f64> of observed prices at time t
+/// * `pt_1` - An Array1<f64> of observed prices at time t-1
+///
+/// # Returns
+///
+/// * `f64` - The negative log-likelihood value
+///
+/// # Notes
+///
+/// The function adds a small constant (1e-10) to each PDF value before taking the logarithm
+/// to avoid potential issues with zero values.
 fn neg_log_likelihood(params: &[f64], pt: &Array1<f64>, pt_1: &Array1<f64>) -> f64 {
     let pdf_vals = mrjpdf(params, pt, pt_1);
     -pdf_vals.mapv(|x| (x + 1e-10).ln()).sum()
 }
 
+/// Adds a Time-Weighted Average Price (TWAP) column to the DataFrame.
+///
+/// This function calculates the 7-day TWAP for the 'base_fee' column and adds it as a new column
+/// named 'TWAP_7d' to the input DataFrame.
+///
+/// # Arguments
+///
+/// * `df` - The input DataFrame containing the 'base_fee' column.
+///
+/// # Returns
+///
+/// A `Result` containing the DataFrame with the added 'TWAP_7d' column, or an `Error` if the
+/// operation fails.
+///
+/// # Errors
+///
+/// This function will return an error if:
+/// * The rolling mean calculation fails.
+/// * The final collection of the lazy DataFrame fails.
+/// 
 fn add_twap_7d(df: DataFrame) -> Result<DataFrame, Error> {
     let df = df
         .lazy()
@@ -116,6 +221,26 @@ fn add_twap_7d(df: DataFrame) -> Result<DataFrame, Error> {
     Ok(df)
 }
 
+/// Groups the DataFrame by 1-hour intervals and aggregates specified columns.
+///
+/// This function takes a DataFrame and groups it by 1-hour intervals based on the 'date' column.
+/// It then calculates the mean values for 'base_fee', 'gas_limit', 'gas_used', and 'number' columns
+/// within each interval.
+///
+/// # Arguments
+///
+/// * `df` - The input DataFrame to be grouped and aggregated.
+///
+/// # Returns
+///
+/// A `Result` containing the grouped and aggregated DataFrame, or an `Error` if the operation fails.
+///
+/// # Errors
+///
+/// This function will return an error if:
+/// * The grouping or aggregation operations fail.
+/// * The final collection of the lazy DataFrame fails.
+/// 
 fn group_by_1h_intervals(df: DataFrame) -> Result<DataFrame, Error> {
     let df = df
         .lazy()
@@ -140,6 +265,28 @@ fn group_by_1h_intervals(df: DataFrame) -> Result<DataFrame, Error> {
     Ok(df)
 }
 
+/// Replaces the 'timestamp' column with a 'date' column in a DataFrame.
+///
+/// This function takes a DataFrame with a 'timestamp' column, converts the timestamps
+/// to milliseconds, casts them to datetime, and replaces the 'timestamp' column with
+/// a new 'date' column.
+///
+/// # Arguments
+///
+/// * `df` - A mutable reference to the input DataFrame.
+///
+/// # Returns
+///
+/// A `Result` containing the modified DataFrame with the 'timestamp' column replaced
+/// by the 'date' column, or an `Error` if the operation fails.
+///
+/// # Errors
+///
+/// This function will return an error if:
+/// * The 'timestamp' column is missing or cannot be accessed.
+/// * The conversion to milliseconds or casting to datetime fails.
+/// * The column replacement or renaming operations fail.
+/// 
 fn replace_timestamp_with_date(mut df: DataFrame) -> Result<DataFrame, Error> {
     let dates = df
         .column("timestamp")?
@@ -175,14 +322,7 @@ fn replace_timestamp_with_date(mut df: DataFrame) -> Result<DataFrame, Error> {
 /// * The 'date' column is missing or cannot be accessed.
 /// * The start or end dates cannot be calculated.
 /// * The DataFrame cannot be filtered or collected for any period.
-///
-/// # Example
-///
-/// ```
-/// let df = // ... create or load your DataFrame
-/// let period_length = 3; // 3-month periods
-/// let period_dfs = split_dataframe_into_periods(df, period_length)?;
-/// ```
+/// 
 fn split_dataframe_into_periods(df: DataFrame, period_length_in_months: i32) -> Result<Vec<DataFrame>, Error> {
     let mut period_dataframes: Vec<DataFrame> = Vec::new();
 
