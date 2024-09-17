@@ -39,8 +39,8 @@ fn main() -> Result<(), Error> {
 
     let mut to_export = Vec::<Period>::new();
 
-    for (idx, period_df) in overlapping_periods_dataframes.iter().enumerate().take(1) {
-        println!{"Simulating prices  for period {}", idx};
+    for (idx, period_df) in overlapping_periods_dataframes.iter().enumerate() {
+        println!{"Simulating prices for period {}", idx};
         
         let twap_7d_series = period_df.column("TWAP_7d")?;
         let strike = twap_7d_series
@@ -52,11 +52,23 @@ fn main() -> Result<(), Error> {
         let n_periods = 720;
         let cap_level = 0.3;
         let risk_free_rate = 0.05;
-
+    
         // Data Cleaning and Preprocessing - removing null if exist and log transformation
         // ===============================================================================================
 
         let mut df = drop_nulls(&period_df, "TWAP_7d")?;
+
+        let period_end_date_timestamp = df
+            .column("date")?
+            .datetime()?
+            .get(df.height() - 1)
+            .ok_or_else(|| err!("No row {} in the date column", df.height() - 1))?;
+
+        let period_start_date_timestamp = df
+            .column("date")?
+            .datetime()?
+            .get(0)
+            .ok_or_else(|| err!("No row 0 in the date column"))?;
 
         // The base fee logarithm is necessary to stabilize variance and make the data more suitable for linear regression analysis
         let log_base_fee = compute_log_of_base_fees(&df)?;
@@ -75,38 +87,7 @@ fn main() -> Result<(), Error> {
         // Seasonality modelling amd removal from the detrended log base fee
         // ===============================================================================================
 
-        let start_date_value = df
-            .column("date")?
-            .datetime()?
-            .get(0)
-            .ok_or_else(|| err!("No row 0 in the date column"))?;
-        let start_date = DateTime::from_timestamp(start_date_value / 1000, 0)
-            .ok_or_else(|| err!("Can't calculate the start date"))?;
-
-        let t_series: Vec<f64> = df
-            .column("date")?
-            .datetime()?
-            .into_iter()
-            .map(|opt_date| {
-                opt_date.map_or(0.0, |date| {
-                    (DateTime::from_timestamp(date / 1000, 0).unwrap() - start_date).num_seconds()
-                        as f64
-                        / 3600.0
-                })
-            })
-            .collect();
-
-        df.with_column(Series::new("t", t_series))?;
-
-        let t_array = df["t"].f64()?.to_ndarray()?.to_owned();
-        let c = season_matrix(t_array);
-
-        let detrended_log_base_fee_array =
-            df["detrended_log_base_fee"].f64()?.to_ndarray()?.to_owned();
-        let season_param = c.least_squares(&detrended_log_base_fee_array)?.solution;
-        let season = c.dot(&season_param);
-        let de_seasonalised_detrended_log_base_fee =
-            df["detrended_log_base_fee"].f64()?.to_ndarray()?.to_owned() - season;
+        let (de_seasonalised_detrended_log_base_fee, season_param) = remove_seasonality(&mut df, period_start_date_timestamp)?;
         df.with_column(Series::new(
             "de_seasonalized_detrended_log_base_fee",
             de_seasonalised_detrended_log_base_fee.clone().to_vec(),
@@ -115,92 +96,14 @@ fn main() -> Result<(), Error> {
         // Monte Carlo Parameter Estimation for the MRJ model
         // ===============================================================================================
 
-        let dt = 1.0 / (365.0 * 24.0);
-        let pt = de_seasonalised_detrended_log_base_fee
-            .slice(s![1..])
-            .to_owned();
-        let pt_1 = de_seasonalised_detrended_log_base_fee
-            .slice(s![..-1])
-            .to_owned();
+        let (de_seasonalized_detrended_simulated_prices, _params) = simulate_prices(
+            de_seasonalised_detrended_log_base_fee.view(),
+            n_periods,
+            num_paths
+        )?;
 
-        let function =
-            NumericalDifferentiation::new(Func(|x: &[f64]| neg_log_likelihood(x, &pt, &pt_1)));
-
-        let minimizer = GradientDescent::new().max_iterations(Some(300));
-
-        let var_pt = pt.var(0.0); // The 0.0 here refers to the degrees of freedom, equivalent to ddof in numpy
-        let solution = minimizer.minimize(
-            &function,
-            vec![-3.928e-02, 2.873e-04, 4.617e-02, var_pt, var_pt, 0.2],
-        );
-
-        let params = &solution.position; // Get the optimized parameters
-        let alpha = params[0] / dt;
-        let kappa = (1.0 - params[1]) / dt;
-        let mu_j = params[2];
-        let sigma = (params[3] / dt).sqrt();
-        let sigma_j = params[4].sqrt();
-        let lambda_ = params[5] / dt;
-
-        // println!("Found solution for Rosenbrock function at f({:?}) = {:?}",
-        //     solution.position, solution.value);
-        // println!("Fitted params: {:?}", params);
-        // println!("alpha: {}", alpha);
-        // println!("kappa: {}", kappa);
-        // println!("mu_J: {}", mu_j);
-        // println!("sigma: {}", sigma);
-        // println!("sigma_J: {}", sigma_j);
-        // println!("lambda_: {}", lambda_);
-
-        // Monte Carlo Simulation of the MRJ model
-        // ===============================================================================================
-
-        let mut rng = thread_rng();
-        let j: Array2<f64> = {
-            let binom = Binomial::new(lambda_ * dt, 1)?;
-            Array2::from_shape_fn((n_periods, num_paths), |_| binom.sample(&mut rng) as f64)
-        };
-
-        let mut sim_prices = Array2::zeros((n_periods, num_paths));
-        sim_prices.slice_mut(s![0, ..]).assign(&Array1::from_elem(
-            num_paths,
-            de_seasonalised_detrended_log_base_fee
-                [de_seasonalised_detrended_log_base_fee.len() - 1],
-        ));
-
-        let normal = Normal::new(0.0, 1.0).unwrap();
-        let n1 = Array2::from_shape_fn((n_periods, num_paths), |_| normal.sample(&mut rng));
-        let n2 = Array2::from_shape_fn((n_periods, num_paths), |_| normal.sample(&mut rng));
-
-        // Simulate the prices over time
-        for i in 1..n_periods {
-            let prev_prices = sim_prices.slice(s![i - 1, ..]);
-            let current_n1 = n1.slice(s![i, ..]);
-            let current_n2 = n2.slice(s![i, ..]);
-            let current_j = j.slice(s![i, ..]);
-
-            let new_prices = &(alpha * dt
-                + (1.0 - kappa * dt) * &prev_prices
-                + sigma * dt.sqrt() * &current_n1
-                + &current_j * (mu_j + sigma_j * &current_n2));
-
-            sim_prices.slice_mut(s![i, ..]).assign(&new_prices);
-        }
-
-        let last_date_value = df
-            .column("date")?
-            .datetime()?
-            .get(df.height() - 1)
-            .ok_or_else(|| err!("No row {} in the date column", df.height() - 1))?;
-
-        let start_date_value = df
-            .column("date")?
-            .datetime()?
-            .get(0)
-            .ok_or_else(|| err!("No row 0 in the date column"))?;
-
-        // Calculate the total hours between start and last date
-        let total_hours = (last_date_value - start_date_value) / 3600 / 1000;
+        // Calculate the total hours in the period
+        let total_hours = (period_end_date_timestamp - period_start_date_timestamp) / 3600 / 1000;
 
         // Generate an array of elapsed hours
         let sim_hourly_times: Array1<f64> =
@@ -211,11 +114,10 @@ fn main() -> Result<(), Error> {
         let c = season_matrix(sim_hourly_times);
         let season = c.dot(&season_param);
 
-        // Reshape season to (n_periods, 1)
         let season_reshaped = season.into_shape((n_periods, 1)).unwrap();
 
-        // Broadcasting addition of season to sim_prices
-        let log_sim_prices = &sim_prices + &season_reshaped;
+        // Broadcasting addition of season to simulated prices
+        let detrended_simulated_prices = &de_seasonalized_detrended_simulated_prices + &season_reshaped;
 
         //  Calibrating and adding stochastic trend to the simulation.
         //  ===============================================================================================
@@ -244,6 +146,7 @@ fn main() -> Result<(), Error> {
 
         // Generate random shocks for each path
         let normal = Normal::new(0.0, sigma * (f64::sqrt(dt))).unwrap();
+        let mut rng = thread_rng();
         for i in 0..num_paths {
             let random_shocks: Vec<f64> = (0..n_periods).map(|_| normal.sample(&mut rng)).collect();
 
@@ -264,22 +167,21 @@ fn main() -> Result<(), Error> {
             coeffs[0] * x + coeffs[1]
         };
 
-        // Use final_trend_value in your simulation
-        let mut sim_log_prices_with_trend = Array2::<f64>::zeros((n_periods, num_paths));
+        let mut simulated_log_prices = Array2::<f64>::zeros((n_periods, num_paths));
         for i in 0..n_periods {
             let trend = final_trend_value; // Use the final trend value for all future time points
             for j in 0..num_paths {
-                sim_log_prices_with_trend[[i, j]] =
-                    log_sim_prices[[i, j]] + trend + stochastic_trend[[i, j]];
+                simulated_log_prices[[i, j]] =
+                detrended_simulated_prices[[i, j]] + trend + stochastic_trend[[i, j]];
             }
         }
 
         // Convert log prices to actual prices
-        let sim_prices = sim_log_prices_with_trend.mapv(f64::exp);
+        let simulated_prices = simulated_log_prices.mapv(f64::exp);
 
         // Calculate TWAP
         let twap_start = n_periods.saturating_sub(24 * 7);
-        let final_prices_twap = sim_prices
+        let final_prices_twap = simulated_prices
             .slice(s![twap_start.., ..])
             .mean_axis(Axis(0))
             .unwrap();
@@ -323,6 +225,143 @@ fn main() -> Result<(), Error> {
         println!();
     }
     Ok(())
+}
+
+/// Removes seasonality from the detrended log base fee and adds relevant columns to the DataFrame.
+///
+/// This function creates a time series, computes the seasonal component, and removes it from the
+/// detrended log base fee. It adds new columns to the DataFrame for the time series and the
+/// de-seasonalized detrended log base fee.
+///
+/// # Arguments
+///
+/// * `df` - A mutable reference to the DataFrame containing the data.
+/// * `start_date_timestamp` - The timestamp of the start date.
+///
+/// # Returns
+///
+/// A Result containing a tuple with two elements:
+/// * The de-seasonalized detrended log base fee as an Array1<f64>
+/// * The seasonal parameters as an Array1<f64>
+/// 
+/// Returns an Error if any operation fails.
+fn remove_seasonality(df: &mut DataFrame, start_date_timestamp: i64) -> Result<(Array1<f64>, Array1<f64>), Error> {
+    let start_date = DateTime::from_timestamp(start_date_timestamp / 1000, 0)
+        .ok_or_else(|| err!("Can't calculate the start date"))?;
+
+    let t_series: Vec<f64> = df
+        .column("date")?
+        .datetime()?
+        .into_iter()
+        .map(|opt_date| {
+            opt_date.map_or(0.0, |date| {
+                (DateTime::from_timestamp(date / 1000, 0).unwrap() - start_date).num_seconds()
+                    as f64
+                    / 3600.0
+            })
+        })
+        .collect();
+
+    df.with_column(Series::new("t", t_series))?;
+
+    let t_array = df["t"].f64()?.to_ndarray()?.to_owned();
+    let c = season_matrix(t_array);
+
+    let detrended_log_base_fee_array =
+        df["detrended_log_base_fee"].f64()?.to_ndarray()?.to_owned();
+    let season_param = c.least_squares(&detrended_log_base_fee_array)?.solution;
+    let season = c.dot(&season_param);
+    let de_seasonalised_detrended_log_base_fee =
+        df["detrended_log_base_fee"].f64()?.to_ndarray()?.to_owned() - season;
+
+    Ok((de_seasonalised_detrended_log_base_fee, season_param))
+}
+
+/// Performs Monte Carlo parameter estimation and simulation for the Mean-Reverting Jump (MRJ) model.
+///
+/// This function estimates the parameters of the MRJ model using Monte Carlo methods,
+/// and then uses these parameters to simulate future prices.
+///
+/// # Arguments
+///
+/// * `de_seasonalised_detrended_log_base_fee` - An array of de-seasonalized and de-trended log base fees.
+/// * `n_periods` - The number of periods to simulate.
+/// * `num_paths` - The number of simulation paths.
+///
+/// # Returns
+///
+/// A tuple containing:
+/// * The simulated prices as a 2D array.
+/// * The estimated model parameters.
+///
+/// # Errors
+///
+/// This function will return an error if:
+/// * The parameter estimation fails.
+/// * The Binomial distribution creation fails.
+fn simulate_prices(
+    de_seasonalised_detrended_log_base_fee: ArrayView1<f64>,
+    n_periods: usize,
+    num_paths: usize
+) -> Result<(Array2<f64>, Vec<f64>), Error> {
+    let dt = 1.0 / (365.0 * 24.0);
+    let pt = de_seasonalised_detrended_log_base_fee
+        .slice(s![1..])
+        .to_owned();
+    let pt_1 = de_seasonalised_detrended_log_base_fee
+        .slice(s![..-1])
+        .to_owned();
+
+    let function =
+        NumericalDifferentiation::new(Func(|x: &[f64]| neg_log_likelihood(x, &pt, &pt_1)));
+
+    let minimizer = GradientDescent::new().max_iterations(Some(300));
+
+    let var_pt = pt.var(0.0);
+    let solution = minimizer.minimize(
+        &function,
+        vec![-3.928e-02, 2.873e-04, 4.617e-02, var_pt, var_pt, 0.2],
+    );
+
+    let params = &solution.position;
+    let alpha = params[0] / dt;
+    let kappa = (1.0 - params[1]) / dt;
+    let mu_j = params[2];
+    let sigma = (params[3] / dt).sqrt();
+    let sigma_j = params[4].sqrt();
+    let lambda_ = params[5] / dt;
+
+    let mut rng = thread_rng();
+    let j: Array2<f64> = {
+        let binom = Binomial::new(lambda_ * dt, 1)?;
+        Array2::from_shape_fn((n_periods, num_paths), |_| binom.sample(&mut rng) as f64)
+    };
+
+    let mut simulated_prices = Array2::zeros((n_periods, num_paths));
+    simulated_prices.slice_mut(s![0, ..]).assign(&Array1::from_elem(
+        num_paths,
+        de_seasonalised_detrended_log_base_fee[de_seasonalised_detrended_log_base_fee.len() - 1],
+    ));
+
+    let normal = Normal::new(0.0, 1.0).unwrap();
+    let n1 = Array2::from_shape_fn((n_periods, num_paths), |_| normal.sample(&mut rng));
+    let n2 = Array2::from_shape_fn((n_periods, num_paths), |_| normal.sample(&mut rng));
+
+    for i in 1..n_periods {
+        let prev_prices = simulated_prices.slice(s![i - 1, ..]);
+        let current_n1 = n1.slice(s![i, ..]);
+        let current_n2 = n2.slice(s![i, ..]);
+        let current_j = j.slice(s![i, ..]);
+
+        let new_prices = &(alpha * dt
+            + (1.0 - kappa * dt) * &prev_prices
+            + sigma * dt.sqrt() * &current_n1
+            + &current_j * (mu_j + sigma_j * &current_n2));
+
+        simulated_prices.slice_mut(s![i, ..]).assign(&new_prices);
+    }
+
+    Ok((simulated_prices, params.to_vec()))
 }
 
 /// Discovers the trend in the log base fee data using linear regression.
