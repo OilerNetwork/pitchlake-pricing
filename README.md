@@ -1,5 +1,9 @@
 # pitchlake-pricing
 
+### ⚠️⚠️⚠️ This repo is not being maintained ⚠️⚠️⚠️
+Here you can find the original Python script and the first Rust implementation.
+Latest Rust implementation can be found in the [fossil repo](https://github.com/OilerNetwork/fossil-offchain-processor/tree/main/crates/server/src/pricing_data)
+
 ### How to run - Rust impl
 
 1. Unzip the dataset 
