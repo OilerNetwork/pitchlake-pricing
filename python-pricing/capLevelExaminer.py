@@ -420,3 +420,7 @@ print("Done!")
 
 
 print("Volatility Final Result (data.csv):", df["volatility_90d"].iloc[-1])
+print(
+    "Volatility Final Result (data.csv) as u128:",
+    (10_000 * df["volatility_90d"].iloc[-1]).astype(int),
+)
